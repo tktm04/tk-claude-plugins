@@ -1,9 +1,0 @@
-{
-  "name": "notion-r2-image",
-  "version": "1.0.0",
-  "description": "NotionにR2経由で画像をアップロードするスキル（プライベートバケット + Workers認証）",
-  "author": {
-    "name": "tktm04"
-  },
-  "keywords": ["notion", "r2", "cloudflare", "image", "upload", "workers"]
-}

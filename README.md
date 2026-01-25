@@ -25,91 +25,83 @@ codex exec --full-auto --sandbox read-only --cd /path/to/project "このコー�
 
 ---
 
-### 2. notion-r2-image
+### 2. notion-image
 
-Notionに画像をアップロードするためのスキル（Cloudflare R2 + Workers経由）。
+Notionに画像を直接アップロードするスキル（Notion File Uploads API使用）。
 
 **機能:**
-- ローカル画像をCloudflare R2（プライベートバケット）にアップロード
-- Cloudflare Workers経由でトークン認証付きURLを生成
-- NotionページにそのURLを埋め込み可能
+- ローカル画像をNotion APIで直接アップロード
+- 指定したNotionページに画像ブロックとして追加
+- 外部ストレージ不要（R2, S3等は不要）
 
 **アーキテクチャ:**
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  Claude Code    │────>│ upload_to_r2.sh  │────>│   Cloudflare    │
-│                 │     │ (AWS Sig V4)     │     │   R2 (PRIVATE)  │
+│  Claude Code    │────>│ upload_to_notion │────>│   Notion API    │
+│                 │     │     .sh          │     │ (File Uploads)  │
 └─────────────────┘     └──────────────────┘     └────────┬────────┘
                                                           │
-┌─────────────────┐     ┌──────────────────┐              │
-│   Notion Page   │<────│ Workers Proxy    │<─────────────┘
-│                 │     │ (token auth)     │
-└─────────────────┘     └──────────────────┘
+                                                 ┌────────▼────────┐
+                                                 │  Notion Page    │
+                                                 │  (画像ブロック)  │
+                                                 └─────────────────┘
 ```
-
-**セキュリティ:**
-- R2バケットは非公開（直接アクセス不可）
-- Workers経由で固定トークン認証（`?token=xxx`）
-- トークンを知らないとアクセスできない
 
 **セットアップ手順:**
 
-1. **Cloudflare R2バケットを作成**
-   - Cloudflare Dashboard > R2 > Create bucket
-   - バケットは**プライベート**設定のまま
+1. **Notion Integrationを作成**
+   - https://www.notion.so/my-integrations にアクセス
+   - 「New integration」で作成
+   - Internal Integration Token（`ntn_`で始まる）をコピー
 
-2. **R2 APIトークンを取得**
-   - R2 > Manage R2 API Tokens > Create API Token
-   - Object Read & Write 権限を付与
-
-3. **設定ファイルを作成**
+2. **設定ファイルを作成**
    ```bash
-   mkdir -p ~/.config/notion-r2-image
+   mkdir -p ~/.config/notion-image
+   chmod 700 ~/.config/notion-image
    ```
 
-   `~/.config/notion-r2-image/.env` を作成:
+   `~/.config/notion-image/.env` を作成:
    ```bash
-   R2_ACCESS_KEY_ID=your_access_key
-   R2_SECRET_ACCESS_KEY=your_secret_key
-   R2_BUCKET_NAME=your-bucket-name
-   R2_ACCOUNT_ID=your_account_id
-   WORKERS_PROXY_URL=https://your-worker.workers.dev
-   WORKERS_AUTH_TOKEN=your_secret_token  # openssl rand -hex 32 で生成
+   NOTION_TOKEN=ntn_xxxxxxxxxxxxx
+   DEFAULT_PAGE_ID=              # オプション
    ```
 
-4. **Cloudflare Workersをデプロイ**
    ```bash
-   cd plugins/notion-r2-image/workers
-   npm install -g wrangler
-   wrangler login
-
-   # wrangler.toml の bucket_name を編集
-
-   # 認証トークンを設定
-   wrangler secret put AUTH_TOKEN
-   # プロンプトでトークンを入力
-
-   # デプロイ
-   wrangler deploy
+   chmod 600 ~/.config/notion-image/.env
    ```
 
-5. **テスト**
+3. **ページにIntegrationを接続**
+   - アップロード先のNotionページを開く
+   - 右上「...」→「接続」→作成したIntegrationを選択
+
+4. **テスト**
    ```bash
-   chmod +x plugins/notion-r2-image/scripts/upload_to_r2.sh
-   ./plugins/notion-r2-image/scripts/upload_to_r2.sh /path/to/image.png
+   ~/個人開発/tk-claude-plugins/plugins/notion-image/scripts/upload_to_notion.sh /path/to/image.png PAGE_ID
    ```
 
 **使用例:**
 ```bash
 # 画像をアップロード
-./plugins/notion-r2-image/scripts/upload_to_r2.sh /tmp/screenshot.png
+./plugins/notion-image/scripts/upload_to_notion.sh /tmp/screenshot.png abc123def456
 
 # 出力例:
+# Uploading: /tmp/screenshot.png
+#   -> Content-Type: image/png
+# Step 1/3: Creating upload object...
+#   -> Upload ID: xxx-xxx-xxx
+# Step 2/3: Sending file...
+#   -> File sent successfully
+# Step 3/3: Attaching to page...
+#   -> Attached to page: abc123def456
 # Upload successful!
-# Notion URL: https://your-worker.workers.dev/images/20240115_143052_screenshot.png?token=xxx
 ```
 
-出力されたURLをNotionの画像ブロック（`/image`）に貼り付けて使用。
+**制限事項:**
+- ファイルサイズ: 20MB以下
+- 対応形式: png, jpg, jpeg, gif, webp, svg
+- アップロード後1時間以内にページに添付必要
+
+**コスト:** 無料（Notion API追加料金なし）
 
 ---
 
