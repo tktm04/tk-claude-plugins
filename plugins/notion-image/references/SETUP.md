@@ -19,9 +19,25 @@ Notion File Uploads APIを使用して画像を直接アップロードする機
                                                  └─────────────────┘
 ```
 
-## セットアップ手順
+## クイックセットアップ
 
-### Step 1: Notion Integrationを作成
+```bash
+# リポジトリのルートで実行
+./scripts/setup.sh notion-image
+
+# シェル設定を反映
+source ~/.zshrc
+```
+
+セットアップスクリプトが自動で:
+- 設定ディレクトリ作成（`~/.config/notion-image`）
+- 設定ファイルテンプレート作成
+- シンボリックリンク作成（`~/bin/notion-upload`）
+- PATH設定を `~/.zshrc` に追加
+
+## 手動ステップ
+
+### 1. Notion Integrationを作成
 
 1. https://www.notion.so/my-integrations にアクセス
 2. 「New integration」をクリック
@@ -33,46 +49,20 @@ Notion File Uploads APIを使用して画像を直接アップロードする機
    - ☑️ Insert content
 7. **Internal Integration Token** をコピー（`ntn_`で始まる）
 
-### Step 2: 設定ディレクトリを作成
+### 2. トークンを設定ファイルに記入
 
 ```bash
-mkdir -p ~/.config/notion-image
-chmod 700 ~/.config/notion-image
+# 設定ファイルを編集
+nano ~/.config/notion-image/.env
 ```
 
-### Step 3: 設定ファイルを作成
+`NOTION_TOKEN=ntn_xxxxxxxxxxxxx` の部分を編集
 
-`~/.config/notion-image/.env` を作成:
-
-```bash
-NOTION_TOKEN=ntn_xxxxxxxxxxxxx  # Step 1でコピーしたトークン
-DEFAULT_PAGE_ID=                 # オプション: デフォルトのアップロード先ページID
-```
-
-権限を設定:
-
-```bash
-chmod 600 ~/.config/notion-image/.env
-```
-
-### Step 4: コマンドをPATHに追加
-
-```bash
-mkdir -p ~/bin
-ln -s /path/to/plugins/notion-image/scripts/upload_to_notion.sh ~/bin/notion-upload
-```
-
-`~/bin` がPATHに含まれていない場合は `.zshrc` 等に追加:
-
-```bash
-export PATH="$HOME/bin:$PATH"
-```
-
-### Step 5: ページにIntegrationを接続
+### 3. ページにIntegrationを接続
 
 1. アップロード先のNotionページを開く
 2. 右上の「...」→「接続」をクリック
-3. Step 1で作成したIntegrationを選択
+3. 作成したIntegrationを選択
 
 ## 使用方法
 
@@ -101,8 +91,8 @@ notion-upload /path/to/image.png
 - 「...」→「接続」でIntegrationを追加
 
 ### command not found: notion-upload
-- シンボリックリンクが正しく作成されているか確認
-- `~/bin` がPATHに含まれているか確認
+- `source ~/.zshrc` を実行
+- シンボリックリンク確認: `ls -la ~/bin/notion-upload`
 
 ### Upload expires
 - アップロード後1時間以内にページに添付する必要あり
