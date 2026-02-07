@@ -1,0 +1,7 @@
+{
+  "name": "peer-review",
+  "version": "1.0.0",
+  "description": "Professor/Studentエージェントチームによる文書レビューと参考文献検証",
+  "keywords": ["review", "peer-review", "professor", "student", "debate", "reference", "citation"],
+  "skills": ["./skills/peer-review", "./skills/check-reference"]
+}

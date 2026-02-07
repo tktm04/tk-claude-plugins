@@ -24,6 +24,13 @@
       "description": "NotionにFile Uploads APIで画像を直接アップロードするスキル",
       "version": "2.0.0",
       "skills": ["./plugins/notion-image/skills/notion-image"]
+    },
+    {
+      "name": "peer-review",
+      "source": "./plugins/peer-review",
+      "description": "Professor/Studentエージェントチームによる文書レビュー",
+      "version": "1.0.0",
+      "skills": ["./plugins/peer-review/skills/peer-review", "./plugins/peer-review/skills/check-reference"]
     }
   ]
 }

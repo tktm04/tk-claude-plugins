@@ -455,11 +455,28 @@ EOF
     fi
 }
 
+# Setup peer-review plugin
+setup_peer_review() {
+    echo ""
+    echo "================================"
+    echo " peer-review セットアップ"
+    echo "================================"
+    echo ""
+
+    install_plugin "peer-review"
+    register_skill "peer-review" "$REPO_DIR/plugins/peer-review/skills/peer-review"
+    register_skill "check-reference" "$REPO_DIR/plugins/peer-review/skills/check-reference"
+    enable_plugin "peer-review"
+
+    info "peer-review はスクリプト不要のオーケストレーションスキルです"
+}
+
 # Setup all plugins
 setup_all() {
     setup_codex
     setup_gemini
     setup_notion_image
+    setup_peer_review
 }
 
 # Show usage
@@ -470,6 +487,7 @@ usage() {
     echo "  codex         - Codex CLIレビュープラグイン"
     echo "  gemini        - Gemini CLIレビュープラグイン"
     echo "  notion-image  - Notion画像アップロードプラグイン"
+    echo "  peer-review   - Professor/Student文書レビュープラグイン"
     echo "  all           - すべてのプラグイン"
     echo ""
     echo "Examples:"
@@ -495,6 +513,9 @@ main() {
             ;;
         notion-image)
             setup_notion_image
+            ;;
+        peer-review)
+            setup_peer_review
             ;;
         all)
             setup_all
