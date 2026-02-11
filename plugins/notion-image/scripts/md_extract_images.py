@@ -22,7 +22,11 @@ def extract_images(md_path: str) -> list[dict]:
     """Markdownから画像参照を抽出し、直前の見出しも記録"""
     md_file = Path(md_path)
     md_dir = md_file.parent
-    content = md_file.read_text()
+    try:
+        content = md_file.read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"Error: Failed to read file: {e}", file=sys.stderr)
+        return []
 
     images = []
     current_heading = None
@@ -32,10 +36,8 @@ def extract_images(md_path: str) -> list[dict]:
         if m := re.match(r'^(#{1,3})\s+(.+)$', line):
             current_heading = m.group(2).strip()
 
-        # 画像参照を検出 ![alt](path)
-        if m := re.search(r'!\[([^\]]*)\]\(([^)]+)\)', line):
-            alt, path = m.groups()
-
+        # 画像参照を検出 ![alt](path) - 1行に複数画像がある場合も対応
+        for alt, path in re.findall(r'!\[([^\]]*)\]\(([^)]+)\)', line):
             # URL画像はスキップ
             if path.startswith(('http://', 'https://')):
                 print(f"Warning: URL image not supported: {path}", file=sys.stderr)

@@ -28,10 +28,10 @@ MarkdownをNotionにアップロードしたい
 ### Step 1: Markdownをプレースホルダー付きで変換
 
 ```bash
-md-to-notion-text <markdown_file> --placeholder > /tmp/converted.md
+md-to-notion-text <markdown_file> > /tmp/converted.md
 ```
 
-注: `md-to-notion-text` は `~/bin` にシンボリックリンクとして配置されます。
+注: `md-to-notion-text` は `~/bin` にシンボリックリンクとして配置されます。デフォルトでプレースホルダーが挿入されます。
 
 出力例:
 ```markdown
@@ -69,12 +69,12 @@ md-to-notion-images <markdown_file> <page_id> --replace-placeholder
 ### md-to-notion-text
 
 ```bash
-md-to-notion-text <markdown_file> [--placeholder | --no-placeholder]
+md-to-notion-text <markdown_file> [--no-placeholder]
 ```
 
 | オプション | 説明 |
 |-----------|------|
-| `--placeholder` | 画像位置に `[画像: filename]` を挿入（デフォルト） |
+| (なし) | 画像位置に `[画像: filename]` を挿入（デフォルト） |
 | `--no-placeholder` | 画像行を削除 |
 
 ### md-to-notion-images

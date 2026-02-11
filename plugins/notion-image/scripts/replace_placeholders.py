@@ -37,7 +37,11 @@ def get_all_blocks(page_id, headers):
     blocks = []
     url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100"
     while url:
-        resp = requests.get(url, headers=headers)
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+        except requests.RequestException as e:
+            print(f"Error: Request failed: {e}", file=sys.stderr)
+            return blocks
         if resp.status_code != 200:
             print(f"Error: {resp.status_code} {resp.text}", file=sys.stderr)
             return blocks
@@ -97,28 +101,35 @@ def upload_image(file_path, token, headers):
     content_type = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                     ".gif": "image/gif", ".webp": "image/webp"}.get(ext, "image/png")
 
-    # Step 1: Create upload
-    resp = requests.post("https://api.notion.com/v1/file_uploads",
-                        headers=headers, json={"name": filename, "content_type": content_type})
-    if resp.status_code != 200:
-        return None
-    upload_obj = resp.json()
+    try:
+        # Step 1: Create upload
+        resp = requests.post("https://api.notion.com/v1/file_uploads",
+                            headers=headers, json={"name": filename, "content_type": content_type}, timeout=30)
+        if resp.status_code != 200:
+            return None
+        upload_obj = resp.json()
 
-    # Step 2: Send file
-    with open(file_path, "rb") as f:
-        resp = requests.post(upload_obj["upload_url"],
-                            headers={"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28"},
-                            files={"file": (filename, f, content_type)})
-    if resp.status_code != 200:
-        return None
+        # Step 2: Send file
+        with open(file_path, "rb") as f:
+            resp = requests.post(upload_obj["upload_url"],
+                                headers={"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28"},
+                                files={"file": (filename, f, content_type)}, timeout=60)
+        if resp.status_code != 200:
+            return None
 
-    return upload_obj["id"]
+        return upload_obj["id"]
+    except requests.RequestException as e:
+        print(f"Error: Upload failed: {e}", file=sys.stderr)
+        return None
 
 
 def delete_block(block_id, headers):
     """ブロックを削除"""
-    resp = requests.delete(f"https://api.notion.com/v1/blocks/{block_id}", headers=headers)
-    return resp.status_code == 200
+    try:
+        resp = requests.delete(f"https://api.notion.com/v1/blocks/{block_id}", headers=headers, timeout=30)
+        return resp.status_code == 200
+    except requests.RequestException:
+        return False
 
 
 def insert_image(page_id, upload_id, after_id, headers, caption=None):
@@ -129,8 +140,11 @@ def insert_image(page_id, upload_id, after_id, headers, caption=None):
     payload = {"children": [image_block]}
     if after_id:
         payload["after"] = after_id
-    resp = requests.patch(f"https://api.notion.com/v1/blocks/{page_id}/children", headers=headers, json=payload)
-    return resp.status_code == 200
+    try:
+        resp = requests.patch(f"https://api.notion.com/v1/blocks/{page_id}/children", headers=headers, json=payload, timeout=30)
+        return resp.status_code == 200
+    except requests.RequestException:
+        return False
 
 
 def main():

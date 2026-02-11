@@ -9,7 +9,7 @@
 #   --dry-run              アップロードせず確認のみ
 #
 
-set -e
+set -euo pipefail
 
 # Ensure ~/bin is in PATH (for jq, notion-upload, etc.)
 export PATH="$HOME/bin:$PATH"
@@ -76,7 +76,8 @@ main() {
         case "$1" in
             --replace-placeholder) replace_placeholder=true ;;
             --dry-run) dry_run=true ;;
-            *) ;;
+            -*) error "Unknown option: $1" ;;
+            *) error "Unexpected argument: $1" ;;
         esac
         shift
     done

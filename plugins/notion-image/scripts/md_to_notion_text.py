@@ -3,7 +3,7 @@
 md_to_notion_text.py - Markdownをプレースホルダー付きで変換
 
 使用法:
-  python md_to_notion_text.py <markdown_file> [--placeholder]
+  python md_to_notion_text.py <markdown_file> [--no-placeholder]
 
 出力: 変換後のMarkdown（画像はプレースホルダーに置換）
 
@@ -19,7 +19,11 @@ from pathlib import Path
 def convert_markdown(md_path: str, use_placeholder: bool = True) -> str:
     """Markdownを変換し、画像参照をプレースホルダーに置換"""
     md_file = Path(md_path)
-    content = md_file.read_text()
+    try:
+        content = md_file.read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"Error: Failed to read file: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if use_placeholder:
         # ![alt](path) → [画像: filename]
@@ -42,10 +46,8 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description='Convert Markdown for Notion upload')
     parser.add_argument('markdown_file', help='Path to the Markdown file')
-    parser.add_argument('--placeholder', action='store_true', default=True,
-                        help='Insert placeholders for images (default: True)')
     parser.add_argument('--no-placeholder', action='store_true',
-                        help='Remove image references instead of placeholders')
+                        help='Remove image references instead of inserting placeholders (default: insert placeholders)')
 
     args = parser.parse_args()
 
