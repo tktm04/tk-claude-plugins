@@ -124,6 +124,7 @@ Notionに画像を直接アップロードするスキル（Notion File Uploads 
 **機能:**
 - ローカル画像をNotion APIで直接アップロード
 - 指定したNotionページに画像ブロックとして追加
+- **Markdownファイル（テキスト＋画像）をNotionページにアップロード** (`/notion-markdown`)
 - 外部ストレージ不要（R2, S3等は不要）
 
 **アーキテクチャ:**
@@ -174,7 +175,15 @@ notion-upload /tmp/screenshot.png PAGE_ID --after BLOCK_ID
 
 # キャプション付きで挿入（キャプションは画像の上に表示）
 notion-upload /tmp/screenshot.png PAGE_ID --after BLOCK_ID --caption "Figure 1"
+
+# Markdownファイル（テキスト＋画像）をNotionにアップロード
+md-to-notion-text report.md > /tmp/converted.md  # プレースホルダー付きMarkdownに変換
+md-to-notion-images report.md PAGE_ID --replace-placeholder  # 画像をアップロード
 ```
+
+**前提条件（notion-markdown）:**
+- Python 3.9+
+- `pip install requests`
 
 **制限事項:**
 - ファイルサイズ: 20MB以下
@@ -202,6 +211,7 @@ mkdir -p ~/.claude/skills
 ln -sf /path/to/tk-claude-plugins/plugins/codex/skills/codex ~/.claude/skills/codex
 ln -sf /path/to/tk-claude-plugins/plugins/gemini/skills/gemini ~/.claude/skills/gemini
 ln -sf /path/to/tk-claude-plugins/plugins/notion-image/skills/notion-image ~/.claude/skills/notion-image
+ln -sf /path/to/tk-claude-plugins/plugins/notion-image/skills/notion-markdown ~/.claude/skills/notion-markdown
 ```
 
 ## Usage
@@ -220,6 +230,10 @@ Claude Codeで以下のように使用:
 # notion-image
 「この画像をNotionにアップロードして」
 /notion-image /path/to/image.png PAGE_ID
+
+# notion-markdown
+「このMarkdownをNotionにアップロードして」
+/notion-markdown report.md PAGE_ID
 ```
 
 コマンドラインからも使用可能:
@@ -234,6 +248,10 @@ gemini-review "このコードをレビューして"
 # notion-image
 notion-upload /path/to/image.png PAGE_ID
 notion-get-blocks PAGE_ID  # ブロックID取得
+
+# notion-markdown
+md-to-notion-text report.md > /tmp/converted.md
+md-to-notion-images report.md PAGE_ID --replace-placeholder
 ```
 
 ## License
