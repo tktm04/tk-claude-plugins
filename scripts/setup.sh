@@ -284,15 +284,6 @@ EOF
     chmod +x "$MD_TEXT_SCRIPT"
     info "シンボリックリンク作成: $BIN_DIR/md-to-notion-text"
 
-    # Check Python dependencies
-    step "Python依存関係を確認..."
-    if python3 -c "import requests" 2>/dev/null; then
-        info "requests: インストール済み"
-    else
-        warn "requests がインストールされていません"
-        echo "  pip3 install requests"
-    fi
-
     # Check if ~/bin is in PATH
     if [[ ":$PATH:" != *":$HOME/bin:"* ]]; then
         add_bin_to_path

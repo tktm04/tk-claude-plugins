@@ -182,8 +182,7 @@ md-to-notion-images report.md PAGE_ID --replace-placeholder  # 画像をアッ�
 ```
 
 **前提条件（notion-markdown）:**
-- Python 3.9+
-- `pip install requests`
+- Python 3.9+（標準ライブラリのみ使用、追加インストール不要）
 
 **制限事項:**
 - ファイルサイズ: 20MB以下
