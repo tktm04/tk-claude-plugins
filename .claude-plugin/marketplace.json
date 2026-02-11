@@ -23,7 +23,7 @@
       "source": "./plugins/notion-image",
       "description": "NotionにFile Uploads APIで画像を直接アップロードするスキル",
       "version": "2.0.0",
-      "skills": ["./plugins/notion-image/skills/notion-image"]
+      "skills": ["./plugins/notion-image/skills/notion-image", "./plugins/notion-image/skills/notion-markdown"]
     }
   ]
 }

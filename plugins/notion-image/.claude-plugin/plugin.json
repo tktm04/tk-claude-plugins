@@ -3,5 +3,5 @@
   "version": "2.0.0",
   "description": "NotionにFile Uploads APIで画像を直接アップロードするスキル",
   "keywords": ["notion", "image", "upload", "file-uploads-api"],
-  "skills": ["./skills/notion-image"]
+  "skills": ["./skills/notion-image", "./skills/notion-markdown"]
 }

@@ -199,6 +199,7 @@ setup_notion_image() {
 
     install_plugin "notion-image"
     register_skill "notion-image" "$REPO_DIR/plugins/notion-image/skills/notion-image"
+    register_skill "notion-markdown" "$REPO_DIR/plugins/notion-image/skills/notion-markdown"
     enable_plugin "notion-image"
 
     CONFIG_DIR="$HOME/.config/notion-image"
@@ -264,6 +265,33 @@ EOF
     ln -s "$BATCH_SCRIPT" "$BIN_DIR/notion-upload-batch"
     chmod +x "$BATCH_SCRIPT"
     info "シンボリックリンク作成: $BIN_DIR/notion-upload-batch"
+
+    # md-to-notion-images (Markdown画像アップロード)
+    local MD_IMAGES_SCRIPT="$REPO_DIR/plugins/notion-image/scripts/md_to_notion_images.sh"
+    if [[ -L "$BIN_DIR/md-to-notion-images" ]]; then
+        rm "$BIN_DIR/md-to-notion-images"
+    fi
+    ln -s "$MD_IMAGES_SCRIPT" "$BIN_DIR/md-to-notion-images"
+    chmod +x "$MD_IMAGES_SCRIPT"
+    info "シンボリックリンク作成: $BIN_DIR/md-to-notion-images"
+
+    # md-to-notion-text (Markdownテキスト変換)
+    local MD_TEXT_SCRIPT="$REPO_DIR/plugins/notion-image/scripts/md_to_notion_text.py"
+    if [[ -L "$BIN_DIR/md-to-notion-text" ]]; then
+        rm "$BIN_DIR/md-to-notion-text"
+    fi
+    ln -s "$MD_TEXT_SCRIPT" "$BIN_DIR/md-to-notion-text"
+    chmod +x "$MD_TEXT_SCRIPT"
+    info "シンボリックリンク作成: $BIN_DIR/md-to-notion-text"
+
+    # Check Python dependencies
+    step "Python依存関係を確認..."
+    if python3 -c "import requests" 2>/dev/null; then
+        info "requests: インストール済み"
+    else
+        warn "requests がインストールされていません"
+        echo "  pip3 install requests"
+    fi
 
     # Check if ~/bin is in PATH
     if [[ ":$PATH:" != *":$HOME/bin:"* ]]; then
