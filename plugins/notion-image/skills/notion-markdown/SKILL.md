@@ -131,8 +131,7 @@ https://www.notion.so/Page-Title-abc123def456...
 
 ## 前提条件
 
-- Python 3.9+ (型ヒント `list[dict]` を使用)
-- `pip install requests` (画像アップロードに必要)
+- Python 3.9+（標準ライブラリのみ使用、追加インストール不要）
 - `~/.config/notion-image/.env` に `NOTION_TOKEN` を設定
 - Notionページで「接続」からIntegrationを追加済み
 - notion-image プラグインがインストール済み (`scripts/setup.sh notion-image`)

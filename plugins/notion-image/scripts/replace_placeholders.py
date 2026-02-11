@@ -4,14 +4,19 @@ replace_placeholders.py - Notionページ内のプレースホルダーを画像
 
 使用法:
   python replace_placeholders.py <markdown_file> <page_id> [--dry-run]
+
+依存関係: 標準ライブラリのみ（Python 3.9+）
 """
 
 import os
 import sys
 import re
+import json
 import argparse
-import requests
 from pathlib import Path
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
+import uuid
 
 
 def load_notion_token():
@@ -32,20 +37,77 @@ def get_headers(token):
     }
 
 
+def http_request(url, method="GET", headers=None, data=None, timeout=30):
+    """標準ライブラリでHTTPリクエストを実行"""
+    headers = headers or {}
+    req = Request(url, method=method)
+    for key, value in headers.items():
+        req.add_header(key, value)
+
+    body = None
+    if data is not None:
+        if isinstance(data, dict):
+            body = json.dumps(data).encode('utf-8')
+            req.add_header("Content-Type", "application/json")
+        elif isinstance(data, bytes):
+            body = data
+
+    try:
+        with urlopen(req, data=body, timeout=timeout) as resp:
+            return resp.status, resp.read().decode('utf-8')
+    except HTTPError as e:
+        return e.code, e.read().decode('utf-8')
+    except URLError as e:
+        print(f"Error: Request failed: {e}", file=sys.stderr)
+        return None, None
+
+
+def create_multipart_body(filename, file_data, content_type):
+    """multipart/form-data ボディを手動で構築"""
+    boundary = f"----WebKitFormBoundary{uuid.uuid4().hex[:16]}"
+
+    body = []
+    body.append(f"--{boundary}".encode())
+    body.append(f'Content-Disposition: form-data; name="file"; filename="{filename}"'.encode())
+    body.append(f"Content-Type: {content_type}".encode())
+    body.append(b"")
+    body.append(file_data)
+    body.append(f"--{boundary}--".encode())
+    body.append(b"")
+
+    return b"\r\n".join(body), boundary
+
+
+def upload_file_multipart(url, token, filename, file_data, content_type, timeout=60):
+    """multipart/form-data でファイルをアップロード"""
+    body, boundary = create_multipart_body(filename, file_data, content_type)
+
+    req = Request(url, method="POST", data=body)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Notion-Version", "2022-06-28")
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read().decode('utf-8')
+    except HTTPError as e:
+        return e.code, e.read().decode('utf-8')
+    except URLError as e:
+        print(f"Error: Upload failed: {e}", file=sys.stderr)
+        return None, None
+
+
 def get_all_blocks(page_id, headers):
     """ページの全ブロックを取得"""
     blocks = []
     url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100"
     while url:
-        try:
-            resp = requests.get(url, headers=headers, timeout=30)
-        except requests.RequestException as e:
-            print(f"Error: Request failed: {e}", file=sys.stderr)
+        status, body = http_request(url, headers=headers, timeout=30)
+        if status is None or status != 200:
+            if body:
+                print(f"Error: {status} {body}", file=sys.stderr)
             return blocks
-        if resp.status_code != 200:
-            print(f"Error: {resp.status_code} {resp.text}", file=sys.stderr)
-            return blocks
-        data = resp.json()
+        data = json.loads(body)
         blocks.extend(data.get("results", []))
         if data.get("has_more"):
             url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100&start_cursor={data['next_cursor']}"
@@ -76,7 +138,13 @@ def extract_images(md_path):
     md_file = Path(md_path)
     md_dir = md_file.parent
     images = {}
-    for match in re.finditer(r'!\[([^\]]*)\]\(([^)]+)\)', md_file.read_text()):
+    try:
+        content = md_file.read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"Error: Failed to read file: {e}", file=sys.stderr)
+        return images
+
+    for match in re.finditer(r'!\[([^\]]*)\]\(([^)]+)\)', content):
         alt, path = match.groups()
 
         # URL画像はスキップ
@@ -101,35 +169,55 @@ def upload_image(file_path, token, headers):
     content_type = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                     ".gif": "image/gif", ".webp": "image/webp"}.get(ext, "image/png")
 
-    try:
-        # Step 1: Create upload
-        resp = requests.post("https://api.notion.com/v1/file_uploads",
-                            headers=headers, json={"name": filename, "content_type": content_type}, timeout=30)
-        if resp.status_code != 200:
-            return None
-        upload_obj = resp.json()
-
-        # Step 2: Send file
-        with open(file_path, "rb") as f:
-            resp = requests.post(upload_obj["upload_url"],
-                                headers={"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28"},
-                                files={"file": (filename, f, content_type)}, timeout=60)
-        if resp.status_code != 200:
-            return None
-
-        return upload_obj["id"]
-    except requests.RequestException as e:
-        print(f"Error: Upload failed: {e}", file=sys.stderr)
+    # Step 1: Create upload
+    status, body = http_request(
+        "https://api.notion.com/v1/file_uploads",
+        method="POST",
+        headers=headers,
+        data={"name": filename, "content_type": content_type},
+        timeout=30
+    )
+    if status is None or status != 200:
+        if body:
+            print(f"Error: Create upload failed: {status} {body}", file=sys.stderr)
         return None
+    upload_obj = json.loads(body)
+
+    # Step 2: Send file
+    try:
+        with open(file_path, "rb") as f:
+            file_data = f.read()
+    except OSError as e:
+        print(f"Error: Failed to read image: {e}", file=sys.stderr)
+        return None
+
+    status, resp_body = upload_file_multipart(
+        upload_obj["upload_url"],
+        token,
+        filename,
+        file_data,
+        content_type,
+        timeout=60
+    )
+    if status is None or status != 200:
+        if resp_body:
+            print(f"Error: File upload failed: {status} {resp_body}", file=sys.stderr)
+        return None
+
+    return upload_obj["id"]
 
 
 def delete_block(block_id, headers):
     """ブロックを削除"""
-    try:
-        resp = requests.delete(f"https://api.notion.com/v1/blocks/{block_id}", headers=headers, timeout=30)
-        return resp.status_code == 200
-    except requests.RequestException:
-        return False
+    status, body = http_request(
+        f"https://api.notion.com/v1/blocks/{block_id}",
+        method="DELETE",
+        headers=headers,
+        timeout=30
+    )
+    if status is not None and status != 200 and body:
+        print(f"Error: Delete block failed: {status} {body}", file=sys.stderr)
+    return status == 200
 
 
 def insert_image(page_id, upload_id, after_id, headers, caption=None):
@@ -140,11 +228,17 @@ def insert_image(page_id, upload_id, after_id, headers, caption=None):
     payload = {"children": [image_block]}
     if after_id:
         payload["after"] = after_id
-    try:
-        resp = requests.patch(f"https://api.notion.com/v1/blocks/{page_id}/children", headers=headers, json=payload, timeout=30)
-        return resp.status_code == 200
-    except requests.RequestException:
-        return False
+
+    status, body = http_request(
+        f"https://api.notion.com/v1/blocks/{page_id}/children",
+        method="PATCH",
+        headers=headers,
+        data=payload,
+        timeout=30
+    )
+    if status is not None and status != 200 and body:
+        print(f"Error: Insert image failed: {status} {body}", file=sys.stderr)
+    return status == 200
 
 
 def main():
