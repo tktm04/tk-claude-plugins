@@ -15,7 +15,7 @@ cd tk-claude-plugins
 # または個別にセットアップ
 ./scripts/setup.sh codex
 ./scripts/setup.sh gemini
-./scripts/setup.sh notion-image
+./scripts/setup.sh notion-image  # notion-markdown も含む
 ```
 
 セットアップ後、**Claude Codeを再起動**するとスキルが認識されます。
@@ -142,7 +142,7 @@ Notionに画像を直接アップロードするスキル（Notion File Uploads 
 
 **セットアップ:**
 ```bash
-./scripts/setup.sh notion-image
+./scripts/setup.sh notion-image  # notion-image と notion-markdown の両方をセットアップ
 ```
 
 **手動ステップ:**
