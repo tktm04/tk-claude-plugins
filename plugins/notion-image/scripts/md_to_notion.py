@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def load_notion_token():
@@ -148,10 +149,20 @@ def parse_inline_formatting(text):
             before = remaining[:match.start()]
             if before:
                 result.append({"type": "text", "text": {"content": before}})
-            result.append({
-                "type": "text",
-                "text": {"content": match.group(1), "link": {"url": match.group(2)}}
-            })
+            url = match.group(2)
+            link_text = match.group(1)
+            if url.startswith(('http://', 'https://')):
+                result.append({
+                    "type": "text",
+                    "text": {"content": link_text, "link": {"url": url}}
+                })
+            else:
+                # ローカルパス → リンクなしイタリックテキスト
+                result.append({
+                    "type": "text",
+                    "text": {"content": link_text},
+                    "annotations": {"italic": True}
+                })
             remaining = remaining[match.end():]
             continue
 
@@ -234,8 +245,12 @@ def build_nested_list(items):
     return result
 
 
-def markdown_to_blocks(content, md_dir):
-    """MarkdownをNotionブロックのリストに変換"""
+def markdown_to_blocks(content, md_dir, upload_ids=None):
+    """MarkdownをNotionブロックのリストに変換
+
+    upload_ids: {filename: upload_id} 事前アップロード済み画像のID
+    """
+    upload_ids = upload_ids or {}
     blocks = []
     lines = content.split('\n')
     i = 0
@@ -279,18 +294,29 @@ def markdown_to_blocks(content, md_dir):
             i += 1
             continue
 
-        # 画像 ![alt](path) → プレースホルダー（後で置換）
+        # 画像 ![alt](path)
         img_match = re.match(r'^!\[([^\]]*)\]\(([^)]+)\)\s*$', line.strip())
         if img_match:
             alt, path = img_match.groups()
             if not path.startswith(('http://', 'https://')):
-                # ローカル画像はプレースホルダー
+                # ローカル画像
                 filename = Path(path).name
-                blocks.append({
-                    "type": "paragraph",
-                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"[画像: {filename}]"}}]},
-                    "_image_placeholder": {"path": path, "alt": alt, "filename": filename}
-                })
+                if filename in upload_ids:
+                    # 事前アップロード済み → 直接画像ブロック
+                    image_block = {
+                        "type": "image",
+                        "image": {"type": "file_upload", "file_upload": {"id": upload_ids[filename]}}
+                    }
+                    if alt:
+                        image_block["image"]["caption"] = [{"type": "text", "text": {"content": alt}}]
+                    blocks.append(image_block)
+                else:
+                    # 未アップロード → プレースホルダー（フォールバック）
+                    blocks.append({
+                        "type": "paragraph",
+                        "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"[画像: {filename}]"}}]},
+                        "_image_placeholder": {"path": path, "alt": alt, "filename": filename}
+                    })
             else:
                 # URL画像はそのまま埋め込み
                 blocks.append({
@@ -394,28 +420,49 @@ def markdown_to_blocks(content, md_dir):
 
         text = ' '.join(para_lines)
 
-        # 段落内の画像参照を抽出してプレースホルダーに変換
-        inline_images = []
+        # 段落内の画像参照を抽出
+        inline_images = []  # 未アップロード画像（フォールバック用）
+        uploaded_images = []  # アップロード済み画像
+
         def extract_inline_image(m):
             alt, path = m.groups()
             if not path.startswith(('http://', 'https://')):
                 filename = Path(path).name
-                inline_images.append({"path": path, "alt": alt, "filename": filename})
-                return f"[画像: {filename}]"
+                if filename in upload_ids:
+                    # アップロード済み → 後で画像ブロック追加
+                    uploaded_images.append({"filename": filename, "alt": alt})
+                    return ""  # テキストから除去
+                else:
+                    # 未アップロード → プレースホルダー
+                    inline_images.append({"path": path, "alt": alt, "filename": filename})
+                    return f"[画像: {filename}]"
             else:
                 # URL画像はそのまま（後で処理しない）
                 return f"[外部画像: {path}]"
 
         text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', extract_inline_image, text)
+        text = re.sub(r'\s+', ' ', text).strip()  # 空白を正規化
 
-        block = {
-            "type": "paragraph",
-            "paragraph": {"rich_text": create_rich_text(text)}
-        }
-        # インライン画像があれば情報を保持
-        if inline_images:
-            block["_inline_images"] = inline_images
-        blocks.append(block)
+        # テキストがあれば段落ブロックを追加
+        if text:
+            block = {
+                "type": "paragraph",
+                "paragraph": {"rich_text": create_rich_text(text)}
+            }
+            # 未アップロードのインライン画像があれば情報を保持
+            if inline_images:
+                block["_inline_images"] = inline_images
+            blocks.append(block)
+
+        # アップロード済み画像を画像ブロックとして追加
+        for img in uploaded_images:
+            image_block = {
+                "type": "image",
+                "image": {"type": "file_upload", "file_upload": {"id": upload_ids[img["filename"]]}}
+            }
+            if img.get("alt"):
+                image_block["image"]["caption"] = [{"type": "text", "text": {"content": img["alt"]}}]
+            blocks.append(image_block)
 
     return blocks
 
@@ -443,19 +490,31 @@ def get_all_blocks(page_id, headers):
     return blocks
 
 
-def delete_all_blocks(page_id, headers):
-    """ページの全ブロックを削除"""
+def delete_all_blocks(page_id, headers, max_workers=5):
+    """ページの全ブロックを並列削除"""
     blocks = get_all_blocks(page_id, headers)
-    for block in blocks:
+    if not blocks:
+        return 0
+
+    def delete_one(block_id):
         status, body = http_request(
-            f"https://api.notion.com/v1/blocks/{block['id']}",
+            f"https://api.notion.com/v1/blocks/{block_id}",
             method="DELETE",
             headers=headers,
             timeout=30
         )
-        if status is not None and status != 200 and body:
-            print(f"Warning: Failed to delete block: {status}", file=sys.stderr)
-    return len(blocks)
+        return status, body, block_id
+
+    failed = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(delete_one, b["id"]) for b in blocks]
+        for future in as_completed(futures):
+            status, body, block_id = future.result()
+            if status is not None and status != 200 and body:
+                print(f"Warning: Failed to delete block {block_id}: {status}", file=sys.stderr)
+                failed += 1
+
+    return len(blocks) - failed
 
 
 def append_blocks(page_id, blocks, headers):
@@ -503,6 +562,49 @@ def update_page_title(page_id, title, headers):
     return status == 200
 
 
+def extract_local_images(content, md_dir):
+    """Markdownから全ローカル画像パスを抽出"""
+    images = {}  # filename -> {"path": ..., "alt": ...}
+    for match in re.finditer(r'!\[([^\]]*)\]\(([^)]+)\)', content):
+        alt, path = match.groups()
+        if not path.startswith(('http://', 'https://')):
+            filename = Path(path).name
+            if Path(path).is_absolute():
+                img_path = Path(path)
+            else:
+                img_path = md_dir / path
+            if img_path.exists():
+                images[filename] = {
+                    "path": str(img_path.resolve()),
+                    "alt": alt
+                }
+    return images
+
+
+def upload_images_parallel(images, token, headers, max_workers=3):
+    """画像を並列アップロード"""
+    if not images:
+        return {}
+
+    upload_ids = {}  # filename -> upload_id
+
+    def do_upload(filename, img_info):
+        upload_id = upload_image(img_info["path"], token, headers)
+        return filename, upload_id
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(do_upload, fn, img) for fn, img in images.items()]
+        for future in as_completed(futures):
+            filename, upload_id = future.result()
+            if upload_id:
+                upload_ids[filename] = upload_id
+                print(f"  {filename}: uploaded")
+            else:
+                print(f"  {filename}: FAIL", file=sys.stderr)
+
+    return upload_ids
+
+
 def upload_image(file_path, token, headers):
     """画像をアップロード"""
     filename = Path(file_path).name
@@ -548,8 +650,8 @@ def upload_image(file_path, token, headers):
     return upload_obj["id"]
 
 
-def replace_placeholders(page_id, blocks, md_dir, token, headers):
-    """プレースホルダーを実画像に置換"""
+def replace_placeholders(page_id, blocks, md_dir, token, headers, max_workers=3):
+    """プレースホルダーを実画像に置換（アップロード並列化）"""
     # 画像情報を収集（独立画像とインライン画像の両方）
     images = {}
     for block in blocks:
@@ -609,6 +711,27 @@ def replace_placeholders(page_id, blocks, md_dir, token, headers):
     if not placeholders:
         return 0
 
+    # 必要な画像を並列アップロード
+    filenames_to_upload = [p["filename"] for p in placeholders if p["filename"] in images]
+    filenames_to_upload = list(set(filenames_to_upload))  # 重複除去
+
+    upload_ids = {}  # filename -> upload_id
+    if filenames_to_upload:
+        def do_upload(filename):
+            img = images[filename]
+            upload_id = upload_image(img["path"], token, headers)
+            return filename, upload_id
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(do_upload, fn) for fn in filenames_to_upload]
+            for future in as_completed(futures):
+                filename, upload_id = future.result()
+                if upload_id:
+                    upload_ids[filename] = upload_id
+                    print(f"  {filename}: uploaded")
+                else:
+                    print(f"  {filename}: FAIL (upload)", file=sys.stderr)
+
     # 重複ブロックIDを追跡（同一ブロックに複数プレースホルダーがある場合）
     processed_blocks = set()
     # 新しく挿入したブロックIDを追跡（連続挿入のprev_id更新用）
@@ -626,19 +749,17 @@ def replace_placeholders(page_id, blocks, md_dir, token, headers):
             return deleted_to_inserted[prev_id]
         return prev_id
 
+    # 挿入処理（順序依存のため逐次実行）
     success = 0
     for p in placeholders:
         filename = p["filename"]
         block_id = p["block_id"]
 
-        if filename not in images:
+        if filename not in upload_ids:
             continue
 
+        upload_id = upload_ids[filename]
         img = images[filename]
-        upload_id = upload_image(img["path"], token, headers)
-        if not upload_id:
-            print(f"  {filename}: FAIL (upload)", file=sys.stderr)
-            continue
 
         # 画像ブロック作成
         image_block = {"type": "image", "image": {"type": "file_upload", "file_upload": {"id": upload_id}}}
@@ -760,19 +881,17 @@ def main():
                     content = '\n'.join(content_lines)
                 break  # 最初の非空行のみチェック
 
-    # ブロックに変換
-    blocks = markdown_to_blocks(content, md_dir)
-
-    # 画像プレースホルダーをカウント（独立画像 + インライン画像）
-    image_count = sum(1 for b in blocks if "_image_placeholder" in b)
-    inline_image_count = sum(len(b.get("_inline_images", [])) for b in blocks)
-    total_images = image_count + inline_image_count
+    # 画像を先に抽出
+    local_images = extract_local_images(content, md_dir)
+    total_images = len(local_images)
 
     if title:
         print(f"Title: \"{title}\"")
-    print(f"Parsed: {len(blocks)} blocks, {total_images} images")
 
     if args.dry_run:
+        # dry-run時は画像なしでブロック生成
+        blocks = markdown_to_blocks(content, md_dir)
+        print(f"Parsed: {len(blocks)} blocks, {total_images} images")
         if title:
             print(f"\n[Dry run] Would set page title: \"{title}\"")
         print(f"\n[Dry run] Would upload {len(blocks)} blocks:")
@@ -799,24 +918,37 @@ def main():
                 print(f"  [{i+1}] {block_type}")
         return
 
+    # 画像を先に並列アップロード（1パス方式）
+    upload_ids = {}
+    if local_images:
+        print(f"Uploading {total_images} images (parallel)...")
+        upload_ids = upload_images_parallel(local_images, token, headers)
+        print(f"  Done: {len(upload_ids)}/{total_images} images")
+
+    # ブロックに変換（アップロード済みIDを渡す）
+    blocks = markdown_to_blocks(content, md_dir, upload_ids)
+    print(f"Parsed: {len(blocks)} blocks")
+
     # 既存コンテンツを削除（appendモードでない場合）
     if not args.append:
         print("Clearing existing content...")
         deleted = delete_all_blocks(args.page_id, headers)
         print(f"  Deleted {deleted} blocks")
 
-    # ブロックを追加
-    print("Uploading text content...")
+    # ブロックを追加（画像ブロック含む）
+    print("Uploading content...")
     if not append_blocks(args.page_id, blocks, headers):
         print("Error: Failed to upload content", file=sys.stderr)
         sys.exit(1)
     print("  Done")
 
-    # 画像を置換
-    if total_images > 0:
-        print(f"Uploading {total_images} images...")
+    # フォールバック: アップロード失敗した画像があればプレースホルダーを置換
+    fallback_count = sum(1 for b in blocks if "_image_placeholder" in b)
+    fallback_count += sum(len(b.get("_inline_images", [])) for b in blocks)
+    if fallback_count > 0:
+        print(f"Processing {fallback_count} remaining images (fallback)...")
         success = replace_placeholders(args.page_id, blocks, md_dir, token, headers)
-        print(f"  Done: {success}/{total_images} images")
+        print(f"  Done: {success}/{fallback_count} images")
 
     # ページタイトルを更新
     if title:
