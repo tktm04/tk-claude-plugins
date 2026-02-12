@@ -299,18 +299,34 @@ def markdown_to_blocks(content, md_dir):
         # 通常の段落
         para_lines = [line]
         i += 1
-        while i < len(lines) and lines[i].strip() and not re.match(r'^(#{1,3}\s|[-*+]\s|\d+\.\s|>|```|!\[)', lines[i]):
+        while i < len(lines) and lines[i].strip() and not re.match(r'^(#{1,3}\s|[-*+]\s|\d+\.\s|>|```|!\[|[-*_]{3,}\s*$)', lines[i]):
             para_lines.append(lines[i])
             i += 1
 
         text = ' '.join(para_lines)
-        # 段落内の画像参照をプレースホルダーに変換
-        text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', lambda m: f"[画像: {Path(m.group(2)).name}]", text)
 
-        blocks.append({
+        # 段落内の画像参照を抽出してプレースホルダーに変換
+        inline_images = []
+        def extract_inline_image(m):
+            alt, path = m.groups()
+            if not path.startswith(('http://', 'https://')):
+                filename = Path(path).name
+                inline_images.append({"path": path, "alt": alt, "filename": filename})
+                return f"[画像: {filename}]"
+            else:
+                # URL画像はそのまま（後で処理しない）
+                return f"[外部画像: {path}]"
+
+        text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', extract_inline_image, text)
+
+        block = {
             "type": "paragraph",
             "paragraph": {"rich_text": create_rich_text(text)}
-        })
+        }
+        # インライン画像があれば情報を保持
+        if inline_images:
+            block["_inline_images"] = inline_images
+        blocks.append(block)
 
     return blocks
 
@@ -425,29 +441,10 @@ def upload_image(file_path, token, headers):
 
 def replace_placeholders(page_id, blocks, md_dir, token, headers):
     """プレースホルダーを実画像に置換"""
-    # ページのブロックを取得
-    page_blocks = get_all_blocks(page_id, headers)
-
-    # プレースホルダーを探す
-    placeholders = []
-    for block in page_blocks:
-        if block["type"] == "paragraph":
-            rich_text = block.get("paragraph", {}).get("rich_text", [])
-            if rich_text:
-                text = rich_text[0].get("plain_text", "")
-                match = re.search(r'\[画像:\s*(.+?)\]', text)
-                if match:
-                    placeholders.append({
-                        "block_id": block["id"],
-                        "filename": match.group(1).strip()
-                    })
-
-    if not placeholders:
-        return 0
-
-    # 画像情報を収集
+    # 画像情報を収集（独立画像とインライン画像の両方）
     images = {}
     for block in blocks:
+        # 独立した画像ブロック
         if "_image_placeholder" in block:
             info = block["_image_placeholder"]
             path = info["path"]
@@ -460,8 +457,66 @@ def replace_placeholders(page_id, blocks, md_dir, token, headers):
                     "path": str(img_path.resolve()),
                     "caption": info.get("alt")
                 }
+        # インライン画像
+        if "_inline_images" in block:
+            for info in block["_inline_images"]:
+                path = info["path"]
+                if Path(path).is_absolute():
+                    img_path = Path(path)
+                else:
+                    img_path = md_dir / path
+                if img_path.exists():
+                    images[info["filename"]] = {
+                        "path": str(img_path.resolve()),
+                        "caption": info.get("alt")
+                    }
 
-    # 置換処理
+    if not images:
+        return 0
+
+    # ページのブロックを取得
+    page_blocks = get_all_blocks(page_id, headers)
+
+    # プレースホルダーを探す（全てのrich_text要素を連結して検索）
+    # 各ブロックで複数のプレースホルダーを検出、プレースホルダーのみかどうかも判定
+    placeholders = []
+    for idx, block in enumerate(page_blocks):
+        if block["type"] == "paragraph":
+            rich_text = block.get("paragraph", {}).get("rich_text", [])
+            full_text = "".join(rt.get("plain_text", "") for rt in rich_text)
+            matches = list(re.finditer(r'\[画像:\s*(.+?)\]', full_text))
+            if matches:
+                # プレースホルダーのみか判定（プレースホルダーを除去して他にテキストがないか）
+                placeholder_only = re.sub(r'\[画像:\s*.+?\]', '', full_text).strip() == ''
+                prev_id = page_blocks[idx-1]["id"] if idx > 0 else None
+                for match in matches:
+                    placeholders.append({
+                        "block_id": block["id"],
+                        "filename": match.group(1).strip(),
+                        "prev_id": prev_id,
+                        "placeholder_only": placeholder_only
+                    })
+
+    if not placeholders:
+        return 0
+
+    # 重複ブロックIDを追跡（同一ブロックに複数プレースホルダーがある場合）
+    processed_blocks = set()
+    # 新しく挿入したブロックIDを追跡（連続挿入のprev_id更新用）
+    last_inserted_id = {}  # block_id -> 最後に挿入したブロックID
+    # 削除されたブロックIDから挿入されたブロックIDへのマッピング
+    deleted_to_inserted = {}  # deleted_block_id -> inserted_block_id
+
+    def resolve_insert_after(block_id, prev_id):
+        """挿入位置を解決（削除済みブロックを考慮）"""
+        # まず同じブロックから前に画像を挿入済みならその後に
+        if block_id in last_inserted_id:
+            return last_inserted_id[block_id]
+        # prev_idが削除済みなら、その代わりに挿入されたブロックを使用
+        if prev_id and prev_id in deleted_to_inserted:
+            return deleted_to_inserted[prev_id]
+        return prev_id
+
     success = 0
     for p in placeholders:
         filename = p["filename"]
@@ -476,45 +531,74 @@ def replace_placeholders(page_id, blocks, md_dir, token, headers):
             print(f"  {filename}: FAIL (upload)", file=sys.stderr)
             continue
 
-        # 前のブロックIDを取得
-        prev_id = None
-        for j, b in enumerate(page_blocks):
-            if b["id"] == block_id and j > 0:
-                prev_id = page_blocks[j-1]["id"]
-                break
-
-        # プレースホルダー削除
-        status, _ = http_request(
-            f"https://api.notion.com/v1/blocks/{block_id}",
-            method="DELETE",
-            headers=headers,
-            timeout=30
-        )
-        if status != 200:
-            print(f"  {filename}: FAIL (delete)", file=sys.stderr)
-            continue
-
-        # 画像挿入
+        # 画像ブロック作成
         image_block = {"type": "image", "image": {"type": "file_upload", "file_upload": {"id": upload_id}}}
         if img.get("caption"):
             image_block["image"]["caption"] = [{"type": "text", "text": {"content": img["caption"]}}]
 
-        payload = {"children": [image_block]}
-        if prev_id:
-            payload["after"] = prev_id
+        # プレースホルダーのみの場合: ブロックを削除して画像を挿入
+        if p["placeholder_only"] and block_id not in processed_blocks:
+            # 挿入位置を決定
+            insert_after = resolve_insert_after(block_id, p["prev_id"])
 
-        status, _ = http_request(
-            f"https://api.notion.com/v1/blocks/{page_id}/children",
-            method="PATCH",
-            headers=headers,
-            data=payload,
-            timeout=30
-        )
-        if status == 200:
-            print(f"  {filename}: OK")
-            success += 1
+            # プレースホルダー削除
+            status, _ = http_request(
+                f"https://api.notion.com/v1/blocks/{block_id}",
+                method="DELETE",
+                headers=headers,
+                timeout=30
+            )
+            if status != 200:
+                print(f"  {filename}: FAIL (delete)", file=sys.stderr)
+                continue
+            processed_blocks.add(block_id)
+
+            # 画像挿入
+            payload = {"children": [image_block]}
+            if insert_after:
+                payload["after"] = insert_after
+
+            status, resp = http_request(
+                f"https://api.notion.com/v1/blocks/{page_id}/children",
+                method="PATCH",
+                headers=headers,
+                data=payload,
+                timeout=30
+            )
+            if status == 200:
+                # 挿入したブロックIDを記録
+                resp_data = json.loads(resp)
+                if resp_data.get("results"):
+                    inserted_id = resp_data["results"][0]["id"]
+                    last_inserted_id[block_id] = inserted_id
+                    # 削除したブロックの代わりに挿入したブロックを記録
+                    deleted_to_inserted[block_id] = inserted_id
+                print(f"  {filename}: OK")
+                success += 1
+            else:
+                print(f"  {filename}: FAIL (insert)", file=sys.stderr)
+
         else:
-            print(f"  {filename}: FAIL (insert)", file=sys.stderr)
+            # テキスト混在: 段落は残し、その後に画像を挿入
+            insert_after = resolve_insert_after(block_id, block_id)
+
+            payload = {"children": [image_block], "after": insert_after}
+
+            status, resp = http_request(
+                f"https://api.notion.com/v1/blocks/{page_id}/children",
+                method="PATCH",
+                headers=headers,
+                data=payload,
+                timeout=30
+            )
+            if status == 200:
+                resp_data = json.loads(resp)
+                if resp_data.get("results"):
+                    last_inserted_id[block_id] = resp_data["results"][0]["id"]
+                print(f"  {filename}: OK (after text)")
+                success += 1
+            else:
+                print(f"  {filename}: FAIL (insert)", file=sys.stderr)
 
     return success
 
@@ -556,10 +640,12 @@ def main():
     # ブロックに変換
     blocks = markdown_to_blocks(content, md_dir)
 
-    # 画像プレースホルダーをカウント
+    # 画像プレースホルダーをカウント（独立画像 + インライン画像）
     image_count = sum(1 for b in blocks if "_image_placeholder" in b)
+    inline_image_count = sum(len(b.get("_inline_images", [])) for b in blocks)
+    total_images = image_count + inline_image_count
 
-    print(f"Parsed: {len(blocks)} blocks, {image_count} images")
+    print(f"Parsed: {len(blocks)} blocks, {total_images} images")
 
     if args.dry_run:
         print("\n[Dry run] Would upload:")
@@ -568,6 +654,9 @@ def main():
             if "_image_placeholder" in block:
                 info = block["_image_placeholder"]
                 print(f"  [{i+1}] {block_type} (image: {info['filename']})")
+            elif "_inline_images" in block:
+                names = [img["filename"] for img in block["_inline_images"]]
+                print(f"  [{i+1}] {block_type} (inline images: {', '.join(names)})")
             else:
                 print(f"  [{i+1}] {block_type}")
         return
@@ -586,10 +675,10 @@ def main():
     print("  Done")
 
     # 画像を置換
-    if image_count > 0:
-        print(f"Uploading {image_count} images...")
+    if total_images > 0:
+        print(f"Uploading {total_images} images...")
         success = replace_placeholders(args.page_id, blocks, md_dir, token, headers)
-        print(f"  Done: {success}/{image_count} images")
+        print(f"  Done: {success}/{total_images} images")
 
     print("\nUpload complete!")
 
