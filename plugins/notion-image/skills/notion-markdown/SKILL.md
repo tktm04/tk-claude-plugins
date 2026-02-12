@@ -70,6 +70,8 @@ md-to-notion-text <markdown_file> [--no-placeholder]
 | (なし) | 画像位置に `[画像: filename]` を挿入（デフォルト） |
 | `--no-placeholder` | 画像行を削除 |
 
+- 相対リンク（例: `[研究計画書](proposal.md)`）は自動でリンクテキストのみを残し、Notionの `Invalid URL` エラーを回避
+
 ### md-to-notion-images
 
 ```bash

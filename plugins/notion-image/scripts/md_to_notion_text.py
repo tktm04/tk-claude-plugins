@@ -16,6 +16,45 @@ import sys
 from pathlib import Path
 
 
+# Notionが受け付ける絶対リンクの代表的なスキーム
+ABSOLUTE_URL_PREFIXES = (
+    "http://",
+    "https://",
+    "mailto:",
+    "tel:",
+    "ftp://",
+)
+
+
+def is_relative_link(target: str) -> bool:
+    """Return True if the Markdown link target should be treated as relative."""
+    if not target:
+        return True
+    cleaned = target.strip()
+    if not cleaned:
+        return True
+    lowered = cleaned.lower()
+    if cleaned.startswith("//"):
+        return False
+    if any(lowered.startswith(prefix) for prefix in ABSOLUTE_URL_PREFIXES):
+        return False
+    # Anything without a scheme (e.g. proposal.md, ../foo/bar) is treated as relative
+    return "://" not in cleaned
+
+
+def strip_relative_links(content: str) -> str:
+    """Replace relative Markdown links with their link text only."""
+
+    def replace_link(match: re.Match) -> str:
+        text = match.group(1)
+        target = match.group(2)
+        return text if is_relative_link(target) else match.group(0)
+
+    # 非貪欲にマッチし、ネストしたリンクは想定しない
+    link_pattern = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
+    return link_pattern.sub(replace_link, content)
+
+
 def convert_markdown(md_path: str, use_placeholder: bool = True) -> str:
     """Markdownを変換し、画像参照をプレースホルダーに置換"""
     md_file = Path(md_path)
@@ -38,6 +77,9 @@ def convert_markdown(md_path: str, use_placeholder: bool = True) -> str:
     else:
         # 画像行を削除
         content = re.sub(r'!\[[^\]]*\]\([^)]+\)\n?', '', content)
+
+    # 相対リンク([text](path/to/file))はリンクテキストだけ残す
+    content = strip_relative_links(content)
 
     return content
 

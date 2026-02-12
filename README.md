@@ -184,6 +184,8 @@ md-to-notion-text report.md > /tmp/converted.md  # プレースホルダー付�
 md-to-notion-images report.md PAGE_ID --replace-placeholder  # 画像をアップロード
 ```
 
+> 相対リンク（例: `[研究計画書](proposal.md)`）はNotionで `Invalid URL` になるため、自動的にリンクテキストのみ残すよう変換されます。
+
 **前提条件（notion-markdown）:**
 - Python 3.9+（標準ライブラリのみ使用、追加インストール不要）
 
