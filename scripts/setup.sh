@@ -284,6 +284,15 @@ EOF
     chmod +x "$MD_TEXT_SCRIPT"
     info "シンボリックリンク作成: $BIN_DIR/md-to-notion-text"
 
+    # md-to-notion (統合コマンド: テキスト＋画像を一発でアップロード)
+    local MD_NOTION_SCRIPT="$REPO_DIR/plugins/notion-image/scripts/md_to_notion.py"
+    if [[ -L "$BIN_DIR/md-to-notion" ]]; then
+        rm "$BIN_DIR/md-to-notion"
+    fi
+    ln -s "$MD_NOTION_SCRIPT" "$BIN_DIR/md-to-notion"
+    chmod +x "$MD_NOTION_SCRIPT"
+    info "シンボリックリンク作成: $BIN_DIR/md-to-notion"
+
     # Check if ~/bin is in PATH
     if [[ ":$PATH:" != *":$HOME/bin:"* ]]; then
         add_bin_to_path

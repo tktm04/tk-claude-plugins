@@ -1,47 +1,43 @@
 ---
 name: notion-markdown
 description: Markdownファイル（テキスト + 画像）をNotionページにアップロードする。使用場面: レポートやドキュメントをNotionに公開したい時。トリガー: md-to-notion, markdown notion, mdアップロード, notionに公開
-allowed-tools: Bash(md-to-notion-text:*), Bash(md-to-notion-images:*), Bash(python3:*), Read, mcp__notion__notion-update-page, mcp__notion__notion-fetch
+allowed-tools: Bash(md-to-notion:*), Bash(md-to-notion-text:*), Bash(md-to-notion-images:*), Read
 ---
 
 # Markdown to Notion Upload
 
 Markdownファイル（テキスト + 画像）をNotionページにアップロードするスキル。
 
-## クイック判断フロー
+## 推奨: 統合コマンド（1コマンドで完結）
 
-```
-MarkdownをNotionにアップロードしたい
-         │
-         ├── テキスト + 画像（推奨）
-         │   └── このスキルのワークフローに従う
-         │
-         ├── テキストのみ
-         │   └── md-to-notion-text → Notion MCP
-         │
-         └── 画像のみ
-             └── md-to-notion-images（または /notion-image スキル）
+```bash
+md-to-notion <markdown_file> <page_id>
 ```
 
-## ワークフロー
+これだけで：
+1. Markdownを解析してNotionブロックに変換
+2. ページにテキストをアップロード
+3. 画像を自動でアップロード・置換
+
+**Claude Code経由でも最小トークン消費で実行可能。**
+
+### オプション
+
+| オプション | 説明 |
+|-----------|------|
+| `--dry-run` | アップロードせず確認のみ |
+| `--append` | 既存コンテンツに追記（デフォルトは置換） |
+
+---
+
+## 個別コマンド（高度な使用）
+
+テキストと画像を別々に処理したい場合：
 
 ### Step 1: Markdownをプレースホルダー付きで変換
 
 ```bash
 md-to-notion-text <markdown_file> > /tmp/converted.md
-```
-
-注: `md-to-notion-text` は `~/bin` にシンボリックリンクとして配置されます。デフォルトでプレースホルダーが挿入されます。
-
-出力例:
-```markdown
-# レポート
-
-## 結果
-[画像: result.png]
-
-## 考察
-...
 ```
 
 ### Step 2: Notion MCPでテキストをアップロード
@@ -51,7 +47,6 @@ notion-update-page を使用:
 - page_id: 対象ページID
 - content_format: markdown
 - content: /tmp/converted.md の内容
-- mode: replace_content
 ```
 
 ### Step 3: 画像をアップロード
@@ -59,8 +54,6 @@ notion-update-page を使用:
 ```bash
 md-to-notion-images <markdown_file> <page_id> --replace-placeholder
 ```
-
-プレースホルダー `[画像: filename]` を検索し、実画像に置換。
 
 ---
 
