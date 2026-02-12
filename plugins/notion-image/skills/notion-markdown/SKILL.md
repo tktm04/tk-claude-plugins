@@ -83,32 +83,37 @@ md-to-notion-images <markdown_file> <page_id> [options]
 
 ---
 
-## 使用例
+## 使い分けガイド
 
-### 完全なワークフロー（推奨）
+### 基本: 統合コマンドを使う（推奨）
 
 ```
-ユーザー: .claude/reports/report.md を https://notion.so/xxx にアップロードして
+ユーザー: report.md を https://notion.so/xxx にアップロードして
 
 Claude:
-1. md_to_notion_text.py で変換
-2. Notion MCP (notion-update-page) でテキストアップロード
-3. md-to-notion-images で画像アップロード
+md-to-notion report.md PAGE_ID
 ```
 
-### テキストのみ
+**統合コマンドを使う場面:**
+- 通常のMarkdownアップロード
+- テキスト＋画像を一括処理したい
+- トークン消費を抑えたい
+
+### 応用: 個別コマンドを使う
+
+**個別コマンドを使う場面:**
+- テキストのみ先にアップロードしたい
+- 画像のみ追加したい
+- Notion MCP で高度な操作（特定ブロック指定など）が必要
+- 途中でエラーになった場合のリカバリ
 
 ```bash
-# 変換
+# テキストのみ
 md-to-notion-text report.md > /tmp/converted.md
+# → Notion MCPでアップロード
 
-# Notion MCP でアップロード（Claude Codeが実行）
-```
-
-### 画像のみ
-
-```bash
-md-to-notion-images report.md PAGE_ID
+# 画像のみ（既存ページのプレースホルダーを置換）
+md-to-notion-images report.md PAGE_ID --replace-placeholder
 ```
 
 ---
