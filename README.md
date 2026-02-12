@@ -176,7 +176,10 @@ notion-upload /tmp/screenshot.png PAGE_ID --after BLOCK_ID
 # キャプション付きで挿入（キャプションは画像の上に表示）
 notion-upload /tmp/screenshot.png PAGE_ID --after BLOCK_ID --caption "Figure 1"
 
-# Markdownファイル（テキスト＋画像）をNotionにアップロード
+# Markdownファイル（テキスト＋画像）をNotionにアップロード（推奨）
+md-to-notion report.md PAGE_ID  # 1コマンドでテキスト＋画像をアップロード
+
+# 個別に処理する場合
 md-to-notion-text report.md > /tmp/converted.md  # プレースホルダー付きMarkdownに変換
 md-to-notion-images report.md PAGE_ID --replace-placeholder  # 画像をアップロード
 ```
@@ -249,8 +252,7 @@ notion-upload /path/to/image.png PAGE_ID
 notion-get-blocks PAGE_ID  # ブロックID取得
 
 # notion-markdown
-md-to-notion-text report.md > /tmp/converted.md
-md-to-notion-images report.md PAGE_ID --replace-placeholder
+md-to-notion report.md PAGE_ID  # 推奨: 1コマンドで完結
 ```
 
 ## License
