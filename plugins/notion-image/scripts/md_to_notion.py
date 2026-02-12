@@ -192,6 +192,48 @@ def parse_inline_formatting(text):
     return result
 
 
+def build_nested_list(items):
+    """インデント付きリストアイテムからネストされたNotionブロックを構築
+
+    Args:
+        items: [(indent_level, 'bullet'|'numbered', text), ...]
+
+    Returns:
+        トップレベルのNotionブロックのリスト（子はchildren内）
+    """
+    if not items:
+        return []
+
+    result = []
+    stack = []  # [(indent_level, block)]
+
+    for indent, list_type, text in items:
+        block_type = "bulleted_list_item" if list_type == 'bullet' else "numbered_list_item"
+        block = {
+            "type": block_type,
+            block_type: {"rich_text": create_rich_text(text)}
+        }
+
+        # スタックからインデントが同じか大きいものをpop
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+
+        if stack:
+            # 親ブロックの子として追加
+            parent_block = stack[-1][1]
+            parent_type = parent_block["type"]
+            if "children" not in parent_block[parent_type]:
+                parent_block[parent_type]["children"] = []
+            parent_block[parent_type]["children"].append(block)
+        else:
+            # トップレベル
+            result.append(block)
+
+        stack.append((indent, block))
+
+    return result
+
+
 def markdown_to_blocks(content, md_dir):
     """MarkdownをNotionブロックのリストに変換"""
     blocks = []
@@ -224,10 +266,10 @@ def markdown_to_blocks(content, md_dir):
             })
             continue
 
-        # 見出し
-        heading_match = re.match(r'^(#{1,3})\s+(.+)$', line)
+        # 見出し (h1-h6、h4以上はh3に変換)
+        heading_match = re.match(r'^(#{1,6})\s+(.+)$', line)
         if heading_match:
-            level = len(heading_match.group(1))
+            level = min(len(heading_match.group(1)), 3)  # Notion APIはh1-h3のみ
             text = heading_match.group(2)
             block_type = f"heading_{level}"
             blocks.append({
@@ -270,24 +312,23 @@ def markdown_to_blocks(content, md_dir):
             })
             continue
 
-        # 番号付きリスト
-        num_match = re.match(r'^(\d+)\.\s+(.+)$', line)
-        if num_match:
-            blocks.append({
-                "type": "numbered_list_item",
-                "numbered_list_item": {"rich_text": create_rich_text(num_match.group(2))}
-            })
-            i += 1
-            continue
-
-        # 箇条書きリスト
-        bullet_match = re.match(r'^[-*+]\s+(.+)$', line)
-        if bullet_match:
-            blocks.append({
-                "type": "bulleted_list_item",
-                "bulleted_list_item": {"rich_text": create_rich_text(bullet_match.group(1))}
-            })
-            i += 1
+        # リスト（箇条書き・番号付き、ネスト対応）
+        bullet_match = re.match(r'^(\s*)([-*+])\s+(.+)$', line)
+        num_match = re.match(r'^(\s*)(\d+)\.\s+(.+)$', line)
+        if bullet_match or num_match:
+            list_items = []  # [(indent, type, text)]
+            while i < len(lines):
+                bm = re.match(r'^(\s*)([-*+])\s+(.+)$', lines[i])
+                nm = re.match(r'^(\s*)(\d+)\.\s+(.+)$', lines[i])
+                if bm:
+                    list_items.append((len(bm.group(1)), 'bullet', bm.group(3)))
+                    i += 1
+                elif nm:
+                    list_items.append((len(nm.group(1)), 'numbered', nm.group(3)))
+                    i += 1
+                else:
+                    break
+            blocks.extend(build_nested_list(list_items))
             continue
 
         # 水平線
@@ -347,7 +388,7 @@ def markdown_to_blocks(content, md_dir):
         # 通常の段落
         para_lines = [line]
         i += 1
-        while i < len(lines) and lines[i].strip() and not re.match(r'^(#{1,3}\s|[-*+]\s|\d+\.\s|>|```|!\[|[-*_]{3,}\s*$|\s*\|)', lines[i]):
+        while i < len(lines) and lines[i].strip() and not re.match(r'^(#{1,6}\s|\s*[-*+]\s|\s*\d+\.\s|>|```|!\[|[-*_]{3,}\s*$|\s*\|)', lines[i]):
             para_lines.append(lines[i])
             i += 1
 
@@ -440,6 +481,26 @@ def append_blocks(page_id, blocks, headers):
                 print(f"Error: Append blocks failed: {status} {body}", file=sys.stderr)
             return False
     return True
+
+
+def update_page_title(page_id, title, headers):
+    """ページタイトルを更新"""
+    status, body = http_request(
+        f"https://api.notion.com/v1/pages/{page_id}",
+        method="PATCH",
+        headers=headers,
+        data={
+            "properties": {
+                "title": {
+                    "title": [{"type": "text", "text": {"content": title}}]
+                }
+            }
+        },
+        timeout=30
+    )
+    if status != 200 and body:
+        print(f"Warning: Failed to update page title: {status}", file=sys.stderr)
+    return status == 200
 
 
 def upload_image(file_path, token, headers):
@@ -661,6 +722,7 @@ def main():
     parser.add_argument('page_id', help='Notion page ID')
     parser.add_argument('--dry-run', action='store_true', help='Show what would be uploaded')
     parser.add_argument('--append', action='store_true', help='Append to existing content (default: replace)')
+    parser.add_argument('--no-title', action='store_true', help='Do not update page title from # heading')
     args = parser.parse_args()
 
     # トークン読み込み
@@ -685,6 +747,19 @@ def main():
         print(f"Error: Failed to read file: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # タイトル抽出（最初の # 見出しをページタイトルとして使用）
+    title = None
+    if not args.no_title:
+        content_lines = content.split('\n')
+        for idx, cline in enumerate(content_lines):
+            if cline.strip():
+                title_match = re.match(r'^#\s+(.+)$', cline.strip())
+                if title_match:
+                    title = title_match.group(1)
+                    content_lines[idx] = ''  # コンテンツから除去
+                    content = '\n'.join(content_lines)
+                break  # 最初の非空行のみチェック
+
     # ブロックに変換
     blocks = markdown_to_blocks(content, md_dir)
 
@@ -693,10 +768,14 @@ def main():
     inline_image_count = sum(len(b.get("_inline_images", [])) for b in blocks)
     total_images = image_count + inline_image_count
 
+    if title:
+        print(f"Title: \"{title}\"")
     print(f"Parsed: {len(blocks)} blocks, {total_images} images")
 
     if args.dry_run:
-        print("\n[Dry run] Would upload:")
+        if title:
+            print(f"\n[Dry run] Would set page title: \"{title}\"")
+        print(f"\n[Dry run] Would upload {len(blocks)} blocks:")
         for i, block in enumerate(blocks):
             block_type = block["type"]
             if "_image_placeholder" in block:
@@ -710,6 +789,12 @@ def main():
                 cols = block["table"].get("table_width", 0)
                 header = "header" if block["table"].get("has_column_header") else "no header"
                 print(f"  [{i+1}] {block_type} ({rows} rows × {cols} cols, {header})")
+            elif block_type in ("bulleted_list_item", "numbered_list_item"):
+                children = block[block_type].get("children", [])
+                if children:
+                    print(f"  [{i+1}] {block_type} (+{len(children)} nested)")
+                else:
+                    print(f"  [{i+1}] {block_type}")
             else:
                 print(f"  [{i+1}] {block_type}")
         return
@@ -732,6 +817,14 @@ def main():
         print(f"Uploading {total_images} images...")
         success = replace_placeholders(args.page_id, blocks, md_dir, token, headers)
         print(f"  Done: {success}/{total_images} images")
+
+    # ページタイトルを更新
+    if title:
+        print(f"Updating page title: \"{title}\"")
+        if update_page_title(args.page_id, title, headers):
+            print("  Done")
+        else:
+            print("  Failed (content was uploaded successfully)", file=sys.stderr)
 
     print("\nUpload complete!")
 
