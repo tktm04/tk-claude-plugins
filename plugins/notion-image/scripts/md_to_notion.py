@@ -296,10 +296,58 @@ def markdown_to_blocks(content, md_dir):
             i += 1
             continue
 
+        # テーブル | col1 | col2 |
+        if re.match(r'^\s*\|(.+\|)+\s*$', line):
+            table_lines = []
+            while i < len(lines) and re.match(r'^\s*\|(.+\|)+\s*$', lines[i]):
+                table_lines.append(lines[i])
+                i += 1
+
+            if len(table_lines) >= 2:
+                # 行をパースし、セパレータ行を検出
+                rows = []
+                has_header = False
+                for j, tl in enumerate(table_lines):
+                    cells = [c.strip() for c in tl.strip().strip('|').split('|')]
+                    # セパレータ行 (|---|---|) の判定
+                    if j == 1 and all(re.match(r'^[-:]+$', c.strip()) for c in cells if c.strip()):
+                        has_header = True
+                        continue
+                    rows.append(cells)
+
+                if rows:
+                    table_width = max(len(row) for row in rows)
+                    children = []
+                    for row in rows:
+                        # 列数を揃える（不足分は空セル）
+                        while len(row) < table_width:
+                            row.append('')
+                        cells = [create_rich_text(cell) for cell in row[:table_width]]
+                        children.append({
+                            "type": "table_row",
+                            "table_row": {"cells": cells}
+                        })
+                    blocks.append({
+                        "type": "table",
+                        "table": {
+                            "table_width": table_width,
+                            "has_column_header": has_header,
+                            "has_row_header": False,
+                            "children": children
+                        }
+                    })
+            else:
+                # 1行だけのテーブル行は段落として処理
+                blocks.append({
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": create_rich_text(table_lines[0])}
+                })
+            continue
+
         # 通常の段落
         para_lines = [line]
         i += 1
-        while i < len(lines) and lines[i].strip() and not re.match(r'^(#{1,3}\s|[-*+]\s|\d+\.\s|>|```|!\[|[-*_]{3,}\s*$)', lines[i]):
+        while i < len(lines) and lines[i].strip() and not re.match(r'^(#{1,3}\s|[-*+]\s|\d+\.\s|>|```|!\[|[-*_]{3,}\s*$|\s*\|)', lines[i]):
             para_lines.append(lines[i])
             i += 1
 
@@ -657,6 +705,11 @@ def main():
             elif "_inline_images" in block:
                 names = [img["filename"] for img in block["_inline_images"]]
                 print(f"  [{i+1}] {block_type} (inline images: {', '.join(names)})")
+            elif block_type == "table":
+                rows = len(block["table"].get("children", []))
+                cols = block["table"].get("table_width", 0)
+                header = "header" if block["table"].get("has_column_header") else "no header"
+                print(f"  [{i+1}] {block_type} ({rows} rows × {cols} cols, {header})")
             else:
                 print(f"  [{i+1}] {block_type}")
         return
