@@ -126,28 +126,47 @@ def create_rich_text(text):
     if not text:
         return []
 
-    # インラインコード、太字、斜体、リンクを処理
+    # インラインコード、インライン数式、太字、斜体、リンクを処理
     result = []
     remaining = text
 
     while remaining:
-        # インラインコード `code`
-        match = re.search(r'`([^`]+)`', remaining)
-        if match:
-            before = remaining[:match.start()]
-            if before:
-                result.extend(parse_inline_formatting(before))
+        # 最も早い位置のマッチを選択（コード vs 数式）
+        code_match = re.search(r'`([^`]+)`', remaining)
+        eq_match = re.search(r'(?<!\$)\$(?!\$|\s)(.+?)(?<!\s|\$)\$(?!\$)', remaining)
+
+        # 候補を位置順にソート
+        candidates = []
+        if code_match:
+            candidates.append(('code', code_match))
+        if eq_match:
+            candidates.append(('equation', eq_match))
+
+        if not candidates:
+            result.extend(parse_inline_formatting(remaining))
+            break
+
+        candidates.sort(key=lambda x: x[1].start())
+        match_type, match = candidates[0]
+
+        before = remaining[:match.start()]
+        if before:
+            result.extend(parse_inline_formatting(before))
+
+        if match_type == 'code':
             result.append({
                 "type": "text",
                 "text": {"content": match.group(1)},
                 "annotations": {"code": True}
             })
-            remaining = remaining[match.end():]
-            continue
+        else:
+            result.append({
+                "type": "equation",
+                "equation": {"expression": match.group(1)}
+            })
 
-        # それ以外
-        result.extend(parse_inline_formatting(remaining))
-        break
+        remaining = remaining[match.end():]
+        continue
 
     return result if result else [{"type": "text", "text": {"content": text}}]
 
@@ -296,6 +315,32 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
             })
             continue
 
+        # ブロック数式 $$...$$
+        if line.strip().startswith('$$'):
+            stripped = line.strip()
+            if stripped.endswith('$$') and len(stripped) > 2 and stripped != '$$':
+                # 単一行: $$expression$$
+                expression = stripped[2:-2].strip()
+                blocks.append({
+                    "type": "equation",
+                    "equation": {"expression": expression}
+                })
+                i += 1
+                continue
+            # 複数行: $$\n...\n$$
+            eq_lines = []
+            i += 1
+            while i < len(lines) and lines[i].strip() != '$$':
+                eq_lines.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1  # 閉じる $$
+            blocks.append({
+                "type": "equation",
+                "equation": {"expression": '\n'.join(eq_lines).strip()}
+            })
+            continue
+
         # 見出し (h1-h6、h4以上はh3に変換)
         heading_match = re.match(r'^(#{1,6})\s+(.+)$', line)
         if heading_match:
@@ -429,7 +474,7 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
         # 通常の段落
         para_lines = [line]
         i += 1
-        while i < len(lines) and lines[i].strip() and not re.match(r'^(#{1,6}\s|\s*[-*+]\s|\s*\d+\.\s|>|```|!\[|[-*_]{3,}\s*$|\s*\|)', lines[i]):
+        while i < len(lines) and lines[i].strip() and not re.match(r'^(#{1,6}\s|\s*[-*+]\s|\s*\d+\.\s|>|```|\$\$|!\[|[-*_]{3,}\s*$|\s*\|)', lines[i]):
             para_lines.append(lines[i])
             i += 1
 
