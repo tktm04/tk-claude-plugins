@@ -22,6 +22,7 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 
 def load_notion_token():
@@ -65,6 +66,20 @@ def http_request(url, method="GET", headers=None, data=None, timeout=30):
     except URLError as e:
         print(f"Error: Request failed: {e}", file=sys.stderr)
         return None, None
+
+
+def http_request_with_retry(url, method="GET", headers=None, data=None,
+                            timeout=30, max_retries=3):
+    """HTTPリクエスト + 429 Rate Limit リトライ（指数バックオフ）"""
+    for attempt in range(max_retries):
+        status, body = http_request(url, method, headers, data, timeout)
+        if status == 429:
+            retry_after = 1.0 * (2 ** attempt)
+            print(f"  Rate limited, retrying in {retry_after}s...", file=sys.stderr)
+            time.sleep(retry_after)
+            continue
+        return status, body
+    return status, body
 
 
 def create_multipart_body(filename, file_data, content_type):
@@ -490,14 +505,10 @@ def get_all_blocks(page_id, headers):
     return blocks
 
 
-def delete_all_blocks(page_id, headers, max_workers=5):
-    """ページの全ブロックを並列削除"""
-    blocks = get_all_blocks(page_id, headers)
-    if not blocks:
-        return 0
-
+def delete_all_blocks(page_id, headers, max_workers=10):
+    """ページの全ブロックをストリーム並列削除（取得しながら即座に削除開始）"""
     def delete_one(block_id):
-        status, body = http_request(
+        status, body = http_request_with_retry(
             f"https://api.notion.com/v1/blocks/{block_id}",
             method="DELETE",
             headers=headers,
@@ -505,16 +516,33 @@ def delete_all_blocks(page_id, headers, max_workers=5):
         )
         return status, body, block_id
 
+    futures = []
+    total = 0
     failed = 0
+    url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100"
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(delete_one, b["id"]) for b in blocks]
+        # ページネーションしながら即座にDELETEをsubmit
+        while url:
+            status, body = http_request(url, headers=headers, timeout=30)
+            if status is None or status != 200:
+                break
+            data = json.loads(body)
+            for block in data.get("results", []):
+                futures.append(executor.submit(delete_one, block["id"]))
+                total += 1
+            if data.get("has_more"):
+                url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100&start_cursor={data['next_cursor']}"
+            else:
+                url = None
+
         for future in as_completed(futures):
             status, body, block_id = future.result()
             if status is not None and status != 200 and body:
                 print(f"Warning: Failed to delete block {block_id}: {status}", file=sys.stderr)
                 failed += 1
 
-    return len(blocks) - failed
+    return total - failed
 
 
 def append_blocks(page_id, blocks, headers):
@@ -528,7 +556,7 @@ def append_blocks(page_id, blocks, headers):
     # 100件ずつ分割
     for i in range(0, len(api_blocks), 100):
         chunk = api_blocks[i:i+100]
-        status, body = http_request(
+        status, body = http_request_with_retry(
             f"https://api.notion.com/v1/blocks/{page_id}/children",
             method="PATCH",
             headers=headers,
@@ -581,7 +609,7 @@ def extract_local_images(content, md_dir):
     return images
 
 
-def upload_images_parallel(images, token, headers, max_workers=3):
+def upload_images_parallel(images, token, headers, max_workers=5):
     """画像を並列アップロード"""
     if not images:
         return {}
@@ -613,7 +641,7 @@ def upload_image(file_path, token, headers):
                     ".gif": "image/gif", ".webp": "image/webp"}.get(ext, "image/png")
 
     # Step 1: Create upload
-    status, body = http_request(
+    status, body = http_request_with_retry(
         "https://api.notion.com/v1/file_uploads",
         method="POST",
         headers=headers,
@@ -772,7 +800,7 @@ def replace_placeholders(page_id, blocks, md_dir, token, headers, max_workers=3)
             insert_after = resolve_insert_after(block_id, p["prev_id"])
 
             # プレースホルダー削除
-            status, _ = http_request(
+            status, _ = http_request_with_retry(
                 f"https://api.notion.com/v1/blocks/{block_id}",
                 method="DELETE",
                 headers=headers,
@@ -788,7 +816,7 @@ def replace_placeholders(page_id, blocks, md_dir, token, headers, max_workers=3)
             if insert_after:
                 payload["after"] = insert_after
 
-            status, resp = http_request(
+            status, resp = http_request_with_retry(
                 f"https://api.notion.com/v1/blocks/{page_id}/children",
                 method="PATCH",
                 headers=headers,
@@ -814,7 +842,7 @@ def replace_placeholders(page_id, blocks, md_dir, token, headers, max_workers=3)
 
             payload = {"children": [image_block], "after": insert_after}
 
-            status, resp = http_request(
+            status, resp = http_request_with_retry(
                 f"https://api.notion.com/v1/blocks/{page_id}/children",
                 method="PATCH",
                 headers=headers,
@@ -918,22 +946,32 @@ def main():
                 print(f"  [{i+1}] {block_type}")
         return
 
-    # 画像を先に並列アップロード（1パス方式）
+    # 画像アップロードとブロック削除を並列実行
     upload_ids = {}
-    if local_images:
+    deleted = 0
+    if local_images and not args.append:
+        # 両方必要: 並列実行（画像UPと既存ブロック削除は独立した操作）
+        print(f"Uploading {total_images} images + clearing page (parallel)...")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_upload = executor.submit(upload_images_parallel, local_images, token, headers)
+            future_delete = executor.submit(delete_all_blocks, args.page_id, headers)
+            upload_ids = future_upload.result()
+            deleted = future_delete.result()
+        print(f"  Images: {len(upload_ids)}/{total_images}, Deleted: {deleted} blocks")
+    elif local_images:
+        # appendモード: 画像アップロードのみ
         print(f"Uploading {total_images} images (parallel)...")
         upload_ids = upload_images_parallel(local_images, token, headers)
         print(f"  Done: {len(upload_ids)}/{total_images} images")
+    elif not args.append:
+        # 画像なし: ブロック削除のみ
+        print("Clearing existing content...")
+        deleted = delete_all_blocks(args.page_id, headers)
+        print(f"  Deleted {deleted} blocks")
 
     # ブロックに変換（アップロード済みIDを渡す）
     blocks = markdown_to_blocks(content, md_dir, upload_ids)
     print(f"Parsed: {len(blocks)} blocks")
-
-    # 既存コンテンツを削除（appendモードでない場合）
-    if not args.append:
-        print("Clearing existing content...")
-        deleted = delete_all_blocks(args.page_id, headers)
-        print(f"  Deleted {deleted} blocks")
 
     # ブロックを追加（画像ブロック含む）
     print("Uploading content...")
