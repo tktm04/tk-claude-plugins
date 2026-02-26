@@ -434,8 +434,11 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
                 # 行をパースし、セパレータ行を検出
                 rows = []
                 has_header = False
+                _ESCAPED_PIPE = "\x00PIPE\x00"  # エスケープ済み \| の一時置換用
                 for j, tl in enumerate(table_lines):
-                    cells = [c.strip() for c in tl.strip().strip('|').split('|')]
+                    # \| をプレースホルダーに退避してからsplit、復元
+                    safe_line = tl.replace('\\|', _ESCAPED_PIPE)
+                    cells = [c.strip().replace(_ESCAPED_PIPE, '|') for c in safe_line.strip().strip('|').split('|')]
                     # セパレータ行 (|---|---|) の判定
                     if j == 1 and all(re.match(r'^[-:]+$', c.strip()) for c in cells if c.strip()):
                         has_header = True
