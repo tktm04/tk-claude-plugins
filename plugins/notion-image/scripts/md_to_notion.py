@@ -66,6 +66,9 @@ def http_request(url, method="GET", headers=None, data=None, timeout=30):
     except URLError as e:
         print(f"Error: Request failed: {e}", file=sys.stderr)
         return None, None
+    except (TimeoutError, OSError) as e:
+        print(f"Error: Request timeout/connection error: {e}", file=sys.stderr)
+        return None, None
 
 
 def http_request_with_retry(url, method="GET", headers=None, data=None,
@@ -114,6 +117,9 @@ def upload_file_multipart(url, token, filename, file_data, content_type, timeout
         return e.code, e.read().decode('utf-8')
     except URLError as e:
         print(f"Error: Upload failed: {e}", file=sys.stderr)
+        return None, None
+    except (TimeoutError, OSError) as e:
+        print(f"Error: Upload timeout/connection error: {e}", file=sys.stderr)
         return None, None
 
 
@@ -553,14 +559,14 @@ def get_all_blocks(page_id, headers):
     return blocks
 
 
-def delete_all_blocks(page_id, headers, max_workers=10):
+def delete_all_blocks(page_id, headers, max_workers=5):
     """ページの全ブロックをストリーム並列削除（取得しながら即座に削除開始）"""
     def delete_one(block_id):
         status, body = http_request_with_retry(
             f"https://api.notion.com/v1/blocks/{block_id}",
             method="DELETE",
             headers=headers,
-            timeout=30
+            timeout=60
         )
         return status, body, block_id
 
@@ -572,7 +578,7 @@ def delete_all_blocks(page_id, headers, max_workers=10):
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # ページネーションしながら即座にDELETEをsubmit
         while url:
-            status, body = http_request(url, headers=headers, timeout=30)
+            status, body = http_request(url, headers=headers, timeout=60)
             if status is None or status != 200:
                 break
             data = json.loads(body)
@@ -585,9 +591,13 @@ def delete_all_blocks(page_id, headers, max_workers=10):
                 url = None
 
         for future in as_completed(futures):
-            status, body, block_id = future.result()
-            if status is not None and status != 200 and body:
-                print(f"Warning: Failed to delete block {block_id}: {status}", file=sys.stderr)
+            try:
+                status, body, block_id = future.result()
+                if status is not None and status != 200 and body:
+                    print(f"Warning: Failed to delete block {block_id}: {status}", file=sys.stderr)
+                    failed += 1
+            except Exception as e:
+                print(f"Warning: Delete worker error: {e}", file=sys.stderr)
                 failed += 1
 
     return total - failed
