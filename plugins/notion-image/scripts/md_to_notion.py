@@ -72,17 +72,34 @@ def http_request(url, method="GET", headers=None, data=None, timeout=30):
 
 
 def http_request_with_retry(url, method="GET", headers=None, data=None,
-                            timeout=30, max_retries=3):
-    """HTTPリクエスト + 429 Rate Limit リトライ（指数バックオフ）"""
+                            timeout=30, max_retries=5):
+    """HTTPリクエスト + 一時的な失敗のリトライ（指数バックオフ）"""
+    last_status = None
+    last_body = None
     for attempt in range(max_retries):
         status, body = http_request(url, method, headers, data, timeout)
+        last_status, last_body = status, body
+
+        should_retry = False
+        reason = None
         if status == 429:
+            should_retry = True
+            reason = "rate limited"
+        elif status is None:
+            should_retry = True
+            reason = "timeout/connection error"
+        elif 500 <= status < 600:
+            should_retry = True
+            reason = f"server error {status}"
+
+        if should_retry and attempt < max_retries - 1:
             retry_after = 1.0 * (2 ** attempt)
-            print(f"  Rate limited, retrying in {retry_after}s...", file=sys.stderr)
+            print(f"  Temporary failure ({reason}), retrying in {retry_after}s...", file=sys.stderr)
             time.sleep(retry_after)
             continue
+
         return status, body
-    return status, body
+    return last_status, last_body
 
 
 def create_multipart_body(filename, file_data, content_type):
@@ -573,6 +590,7 @@ def delete_all_blocks(page_id, headers, max_workers=5):
     futures = []
     total = 0
     failed = 0
+    completed = 0
     url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100"
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -585,6 +603,8 @@ def delete_all_blocks(page_id, headers, max_workers=5):
             for block in data.get("results", []):
                 futures.append(executor.submit(delete_one, block["id"]))
                 total += 1
+                if total % 50 == 0:
+                    print(f"  delete queued: {total} blocks")
             if data.get("has_more"):
                 url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100&start_cursor={data['next_cursor']}"
             else:
@@ -596,9 +616,15 @@ def delete_all_blocks(page_id, headers, max_workers=5):
                 if status is not None and status != 200 and body:
                     print(f"Warning: Failed to delete block {block_id}: {status}", file=sys.stderr)
                     failed += 1
+                completed += 1
+                if completed == total or completed % 50 == 0:
+                    print(f"  delete progress: {completed}/{total} done, failed={failed}")
             except Exception as e:
                 print(f"Warning: Delete worker error: {e}", file=sys.stderr)
                 failed += 1
+                completed += 1
+                if completed == total or completed % 50 == 0:
+                    print(f"  delete progress: {completed}/{total} done, failed={failed}")
 
     return total - failed
 
@@ -612,8 +638,13 @@ def append_blocks(page_id, blocks, headers):
         api_blocks.append(b)
 
     # 100件ずつ分割
-    for i in range(0, len(api_blocks), 100):
+    total_chunks = (len(api_blocks) + 99) // 100
+    for chunk_idx, i in enumerate(range(0, len(api_blocks), 100), start=1):
         chunk = api_blocks[i:i+100]
+        print(
+            f"  append chunk {chunk_idx}/{total_chunks}: "
+            f"blocks {i + 1}-{i + len(chunk)} / {len(api_blocks)}"
+        )
         status, body = http_request_with_retry(
             f"https://api.notion.com/v1/blocks/{page_id}/children",
             method="PATCH",
@@ -625,6 +656,7 @@ def append_blocks(page_id, blocks, headers):
             if body:
                 print(f"Error: Append blocks failed: {status} {body}", file=sys.stderr)
             return False
+        print(f"  append chunk {chunk_idx}/{total_chunks}: done")
     return True
 
 
