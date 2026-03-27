@@ -364,6 +364,41 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
             })
             continue
 
+        # トグルブロック <details><summary>...</summary>...</details>
+        details_match = re.match(r'^<details\s*.*?>\s*$', line, re.IGNORECASE)
+        if details_match:
+            i += 1
+            # <summary>行を探す
+            summary_text = "Toggle"
+            if i < len(lines):
+                summary_match = re.match(r'^<summary>(.*?)</summary>\s*$', lines[i].strip(), re.IGNORECASE)
+                if summary_match:
+                    summary_text = summary_match.group(1).strip()
+                    i += 1
+
+            # </details> までの内容を再帰的にパース
+            inner_lines = []
+            while i < len(lines) and not re.match(r'^</details>\s*$', lines[i].strip(), re.IGNORECASE):
+                inner_lines.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1  # </details> をスキップ
+
+            inner_content = '\n'.join(inner_lines)
+            children = markdown_to_blocks(inner_content, md_dir, upload_ids)
+
+            # toggle heading_3 として出力（is_toggleable: true）
+            toggle_block = {
+                "type": "heading_3",
+                "heading_3": {
+                    "rich_text": create_rich_text(summary_text),
+                    "is_toggleable": True,
+                    "children": children
+                }
+            }
+            blocks.append(toggle_block)
+            continue
+
         # 見出し (h1-h6、h4以上はh3に変換)
         heading_match = re.match(r'^(#{1,6})\s+(.+)$', line)
         if heading_match:
