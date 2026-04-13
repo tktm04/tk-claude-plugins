@@ -493,10 +493,16 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
                 rows = []
                 has_header = False
                 _ESCAPED_PIPE = "\x00PIPE\x00"  # エスケープ済み \| の一時置換用
+                _INLINE_CODE_PIPE = "\x00CODEPIPE\x00"
+                _BOLD_PIPE = "\x00BOLDPIPE\x00"
                 for j, tl in enumerate(table_lines):
                     # \| をプレースホルダーに退避してからsplit、復元
                     safe_line = tl.replace('\\|', _ESCAPED_PIPE)
-                    cells = [c.strip().replace(_ESCAPED_PIPE, '|') for c in safe_line.strip().strip('|').split('|')]
+                    # インラインコード内の | を退避: `...|...` → プレースホルダー
+                    safe_line = re.sub(r'`([^`]*)`', lambda m: '`' + m.group(1).replace('|', _INLINE_CODE_PIPE) + '`', safe_line)
+                    # 太字内の | を退避: **...|...** → プレースホルダー
+                    safe_line = re.sub(r'\*\*([^*]*)\*\*', lambda m: '**' + m.group(1).replace('|', _BOLD_PIPE) + '**', safe_line)
+                    cells = [c.strip().replace(_ESCAPED_PIPE, '|').replace(_INLINE_CODE_PIPE, '|').replace(_BOLD_PIPE, '|') for c in safe_line.strip().strip('|').split('|')]
                     # セパレータ行 (|---|---|) の判定
                     if j == 1 and all(re.match(r'^[-:]+$', c.strip()) for c in cells if c.strip()):
                         has_header = True
