@@ -144,6 +144,69 @@ def upload_file_multipart(url, token, filename, file_data, content_type, timeout
 # Markdown → Notion ブロック変換
 # =============================================================================
 
+# Notion API の code.language enum として有効な値
+# （2024 時点で公開されている一覧。未知のものは "plain text" にフォールバックする）
+_NOTION_CODE_LANGUAGES = frozenset({
+    "abap", "agda", "arduino", "ascii art", "assembly", "bash", "basic",
+    "bnf", "c", "c#", "c++", "clojure", "coffeescript", "coq", "css", "dart",
+    "dhall", "diff", "docker", "ebnf", "elixir", "elm", "erlang", "f#",
+    "flow", "fortran", "gherkin", "glsl", "go", "graphql", "groovy",
+    "haskell", "hcl", "html", "idris", "java", "javascript", "json",
+    "julia", "kotlin", "latex", "less", "lisp", "livescript", "llvm ir",
+    "lua", "makefile", "markdown", "markup", "matlab", "mathematica",
+    "mermaid", "nix", "notion formula", "objective-c", "ocaml", "pascal",
+    "perl", "php", "plain text", "powershell", "prolog", "protobuf",
+    "purescript", "python", "r", "racket", "reason", "ruby", "rust", "sass",
+    "scala", "scheme", "scss", "shell", "smalltalk", "solidity", "sql",
+    "swift", "toml", "typescript", "vb.net", "verilog", "vhdl",
+    "visual basic", "webassembly", "xml", "yaml", "java/c/c++/c#",
+})
+
+# よくある alias を enum 値にマップ
+_CODE_LANGUAGE_ALIASES = {
+    "py": "python", "py3": "python",
+    "js": "javascript", "node": "javascript",
+    "ts": "typescript", "tsx": "typescript",
+    "jsx": "javascript",
+    "sh": "shell", "zsh": "shell", "bash": "bash",
+    "cmd": "shell", "console": "shell",
+    "yml": "yaml",
+    "md": "markdown", "mdx": "markdown",
+    "dockerfile": "docker",
+    "rb": "ruby",
+    "rs": "rust",
+    "kt": "kotlin", "kts": "kotlin",
+    "cs": "c#", "csharp": "c#",
+    "cpp": "c++", "cxx": "c++", "cc": "c++", "hpp": "c++",
+    "obj-c": "objective-c", "objc": "objective-c",
+    "fs": "f#", "fsharp": "f#",
+    "vb": "visual basic",
+    "tex": "latex",
+    "text": "plain text", "txt": "plain text", "plaintext": "plain text",
+    "": "plain text",
+}
+
+
+def _normalize_code_language(lang):
+    """fenced code block の言語指定を Notion API 有効な enum 値に正規化する
+
+    - 空・未指定 → "plain text"
+    - 既知の alias → 正規形にマップ
+    - 不明な値 → "plain text"（API エラーを避けるため）
+    """
+    if not lang:
+        return "plain text"
+    key = lang.strip().lower()
+    if key in _CODE_LANGUAGE_ALIASES:
+        return _CODE_LANGUAGE_ALIASES[key]
+    if key in _NOTION_CODE_LANGUAGES:
+        return key
+    print(
+        f"Warning: unknown code language {lang!r} — falling back to 'plain text'",
+        file=sys.stderr,
+    )
+    return "plain text"
+
 def create_rich_text(text):
     """テキストをリッチテキストオブジェクトに変換"""
     if not text:
@@ -195,18 +258,51 @@ def create_rich_text(text):
     return result if result else [{"type": "text", "text": {"content": text}}]
 
 
+_LINK_RE = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
+_BOLD_RE = re.compile(r'\*\*([^*\n]+)\*\*')
+# 単語内の `_`（例: s_win, foo_bar）はイタリック扱いしない（CommonMark準拠）
+_ITALIC_RE = re.compile(
+    r'(?<!\*)\*([^*\n]+)\*(?!\*)|(?<![A-Za-z0-9_])_([^_\n]+)_(?![A-Za-z0-9_])'
+)
+
+
 def parse_inline_formatting(text):
-    """太字、斜体、リンクを処理"""
+    """太字、斜体、リンクを処理
+
+    「最も左にあるマッチ」を順に消費することで、例えば `*italic* と **bold**`
+    のように並んだときに左側の italic が太字優先で取りこぼされないようにする。
+    """
     result = []
     remaining = text
 
     while remaining:
-        # リンク [text](url)
-        match = re.search(r'\[([^\]]+)\]\(([^)]+)\)', remaining)
-        if match:
-            before = remaining[:match.start()]
-            if before:
-                result.append({"type": "text", "text": {"content": before}})
+        candidates = []
+        m = _LINK_RE.search(remaining)
+        if m:
+            candidates.append(('link', m))
+        m = _BOLD_RE.search(remaining)
+        if m:
+            candidates.append(('bold', m))
+        m = _ITALIC_RE.search(remaining)
+        if m:
+            candidates.append(('italic', m))
+
+        if not candidates:
+            if remaining:
+                result.append({"type": "text", "text": {"content": remaining}})
+            break
+
+        # 同じ start 位置なら、より長いトークンから使う方が素直な解釈になる
+        # （`**x**` を italic が食わないよう、bold を優先）
+        priority = {'link': 0, 'bold': 1, 'italic': 2}
+        candidates.sort(key=lambda x: (x[1].start(), priority[x[0]]))
+        kind, match = candidates[0]
+
+        before = remaining[:match.start()]
+        if before:
+            result.append({"type": "text", "text": {"content": before}})
+
+        if kind == 'link':
             url = match.group(2)
             link_text = match.group(1)
             if url.startswith(('http://', 'https://')):
@@ -216,51 +312,25 @@ def parse_inline_formatting(text):
                 })
             else:
                 # ローカルパス → リンクなしプレーンテキスト
-                # （Notion 上でイタリックにすると誤って強調扱いに見えるため）
                 result.append({
                     "type": "text",
                     "text": {"content": link_text}
                 })
-            remaining = remaining[match.end():]
-            continue
-
-        # 太字 **text**（改行をまたがない）
-        match = re.search(r'\*\*([^*\n]+)\*\*', remaining)
-        if match:
-            before = remaining[:match.start()]
-            if before:
-                result.append({"type": "text", "text": {"content": before}})
+        elif kind == 'bold':
             result.append({
                 "type": "text",
                 "text": {"content": match.group(1)},
                 "annotations": {"bold": True}
             })
-            remaining = remaining[match.end():]
-            continue
-
-        # 斜体 *text* or _text_
-        # 単語内の `_`（例: s_win, foo_bar）はイタリック扱いしない（CommonMark準拠）
-        match = re.search(
-            r'(?<!\*)\*([^*\n]+)\*(?!\*)|(?<![A-Za-z0-9_])_([^_\n]+)_(?![A-Za-z0-9_])',
-            remaining,
-        )
-        if match:
-            before = remaining[:match.start()]
-            if before:
-                result.append({"type": "text", "text": {"content": before}})
+        else:  # italic
             content = match.group(1) or match.group(2)
             result.append({
                 "type": "text",
                 "text": {"content": content},
                 "annotations": {"italic": True}
             })
-            remaining = remaining[match.end():]
-            continue
 
-        # マッチなし
-        if remaining:
-            result.append({"type": "text", "text": {"content": remaining}})
-        break
+        remaining = remaining[match.end():]
 
     return result
 
@@ -327,7 +397,8 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
 
         # コードブロック ```
         if line.strip().startswith('```'):
-            language = line.strip()[3:].strip() or "plain text"
+            raw_lang = line.strip()[3:].strip()
+            language = _normalize_code_language(raw_lang)
             code_lines = []
             i += 1
             while i < len(lines) and not lines[i].strip().startswith('```'):
