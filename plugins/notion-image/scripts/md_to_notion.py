@@ -155,8 +155,9 @@ def create_rich_text(text):
 
     while remaining:
         # 最も早い位置のマッチを選択（コード vs 数式）
-        code_match = re.search(r'`([^`]+)`', remaining)
-        eq_match = re.search(r'(?<!\$)\$(?!\$|\s)(.+?)(?<!\s|\$)\$(?!\$)', remaining)
+        # 改行をまたぐマッチは許可しない（段落の改行保持と両立させるため）
+        code_match = re.search(r'`([^`\n]+)`', remaining)
+        eq_match = re.search(r'(?<!\$)\$(?!\$|\s)([^\n]+?)(?<!\s|\$)\$(?!\$)', remaining)
 
         # 候補を位置順にソート
         candidates = []
@@ -214,17 +215,17 @@ def parse_inline_formatting(text):
                     "text": {"content": link_text, "link": {"url": url}}
                 })
             else:
-                # ローカルパス → リンクなしイタリックテキスト
+                # ローカルパス → リンクなしプレーンテキスト
+                # （Notion 上でイタリックにすると誤って強調扱いに見えるため）
                 result.append({
                     "type": "text",
-                    "text": {"content": link_text},
-                    "annotations": {"italic": True}
+                    "text": {"content": link_text}
                 })
             remaining = remaining[match.end():]
             continue
 
-        # 太字 **text**
-        match = re.search(r'\*\*([^*]+)\*\*', remaining)
+        # 太字 **text**（改行をまたがない）
+        match = re.search(r'\*\*([^*\n]+)\*\*', remaining)
         if match:
             before = remaining[:match.start()]
             if before:
@@ -238,7 +239,11 @@ def parse_inline_formatting(text):
             continue
 
         # 斜体 *text* or _text_
-        match = re.search(r'(?<!\*)\*([^*]+)\*(?!\*)|_([^_]+)_', remaining)
+        # 単語内の `_`（例: s_win, foo_bar）はイタリック扱いしない（CommonMark準拠）
+        match = re.search(
+            r'(?<!\*)\*([^*\n]+)\*(?!\*)|(?<![A-Za-z0-9_])_([^_\n]+)_(?![A-Za-z0-9_])',
+            remaining,
+        )
         if match:
             before = remaining[:match.start()]
             if before:
@@ -399,16 +404,30 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
             blocks.append(toggle_block)
             continue
 
-        # 見出し (h1-h6、h4以上はh3に変換)
+        # 見出し (h1-h6)
+        # Notion APIはh1-h3のみ対応。h4以降は「太字段落」として表現することで
+        # 階層情報の欠落を最小化する（H3に潰さない）
         heading_match = re.match(r'^(#{1,6})\s+(.+)$', line)
         if heading_match:
-            level = min(len(heading_match.group(1)), 3)  # Notion APIはh1-h3のみ
+            raw_level = len(heading_match.group(1))
             text = heading_match.group(2)
-            block_type = f"heading_{level}"
-            blocks.append({
-                "type": block_type,
-                block_type: {"rich_text": create_rich_text(text)}
-            })
+            if raw_level <= 3:
+                block_type = f"heading_{raw_level}"
+                blocks.append({
+                    "type": block_type,
+                    block_type: {"rich_text": create_rich_text(text)}
+                })
+            else:
+                # H4+ は bold paragraph として出力（視覚的に見出しと区別可能）
+                rich = create_rich_text(text)
+                for seg in rich:
+                    if seg.get("type") == "text":
+                        ann = seg.setdefault("annotations", {})
+                        ann["bold"] = True
+                blocks.append({
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": rich}
+                })
             i += 1
             continue
 
@@ -452,7 +471,7 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
                 i += 1
             blocks.append({
                 "type": "quote",
-                "quote": {"rich_text": create_rich_text(' '.join(quote_lines))}
+                "quote": {"rich_text": create_rich_text('\n'.join(quote_lines))}
             })
             continue
 
@@ -510,13 +529,35 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
                     rows.append(cells)
 
                 if rows:
-                    table_width = max(len(row) for row in rows)
+                    # ヘッダーがある場合は必ずヘッダー幅に合わせる
+                    # （データ行に素の `|` が紛れて過剰なセルに分裂しても、
+                    #  ヘッダー幅で truncate することで破壊を最小化する）
+                    if has_header:
+                        table_width = len(rows[0])
+                    else:
+                        # 最頻出の列数を採用（外れ値の影響を減らす）
+                        from collections import Counter
+                        width_counts = Counter(len(r) for r in rows)
+                        table_width = width_counts.most_common(1)[0][0]
+
+                    # 列数不一致を警告（修正の手掛かりにするため行番号も出す）
+                    for ri, row in enumerate(rows):
+                        if len(row) != table_width:
+                            print(
+                                f"Warning: table row {ri} has {len(row)} cells, "
+                                f"expected {table_width} — "
+                                f"{'truncating' if len(row) > table_width else 'padding with empty'}",
+                                file=sys.stderr,
+                            )
+
                     children = []
                     for row in rows:
-                        # 列数を揃える（不足分は空セル）
-                        while len(row) < table_width:
-                            row.append('')
-                        cells = [create_rich_text(cell) for cell in row[:table_width]]
+                        # 不足は空セルで埋め、超過は truncate
+                        if len(row) < table_width:
+                            row = row + [''] * (table_width - len(row))
+                        else:
+                            row = row[:table_width]
+                        cells = [create_rich_text(cell) for cell in row]
                         children.append({
                             "type": "table_row",
                             "table_row": {"cells": cells}
@@ -545,7 +586,8 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
             para_lines.append(lines[i])
             i += 1
 
-        text = ' '.join(para_lines)
+        # 改行を保持して結合（Notion rich_text は content 内の \n を改行として扱う）
+        text = '\n'.join(para_lines)
 
         # 段落内の画像参照を抽出
         inline_images = []  # 未アップロード画像（フォールバック用）
@@ -568,7 +610,8 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
                 return f"[外部画像: {path}]"
 
         text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', extract_inline_image, text)
-        text = re.sub(r'\s+', ' ', text).strip()  # 空白を正規化
+        # 改行は保持しつつ、各行内の水平空白のみ正規化
+        text = '\n'.join(re.sub(r'[ \t]+', ' ', ln).strip() for ln in text.split('\n')).strip('\n')
 
         # テキストがあれば段落ブロックを追加
         if text:
