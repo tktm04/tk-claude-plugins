@@ -582,6 +582,7 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
                 # 行をパースし、セパレータ行を検出
                 rows = []
                 has_header = False
+                separator_width = None  # GFMテーブルの正準列数（|---|---| の数）
                 _ESCAPED_PIPE = "\x00PIPE\x00"  # エスケープ済み \| の一時置換用
                 _INLINE_CODE_PIPE = "\x00CODEPIPE\x00"
                 _BOLD_PIPE = "\x00BOLDPIPE\x00"
@@ -596,14 +597,17 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
                     # セパレータ行 (|---|---|) の判定
                     if j == 1 and all(re.match(r'^[-:]+$', c.strip()) for c in cells if c.strip()):
                         has_header = True
+                        separator_width = len(cells)
                         continue
                     rows.append(cells)
 
                 if rows:
-                    # ヘッダーがある場合は必ずヘッダー幅に合わせる
-                    # （データ行に素の `|` が紛れて過剰なセルに分裂しても、
-                    #  ヘッダー幅で truncate することで破壊を最小化する）
-                    if has_header:
+                    # GFM/CommonMark 的には separator 行の列数がテーブルの「正準列数」。
+                    # ヘッダーに素の `|`（例: 絶対値記号 `|x|`）が紛れて過剰セルに
+                    # 分裂しても、separator 基準で truncate することで形状を揃える。
+                    if separator_width is not None:
+                        table_width = separator_width
+                    elif has_header:
                         table_width = len(rows[0])
                     else:
                         # 最頻出の列数を採用（外れ値の影響を減らす）
