@@ -207,53 +207,109 @@ def _normalize_code_language(lang):
     )
     return "plain text"
 
-def create_rich_text(text):
-    """テキストをリッチテキストオブジェクトに変換"""
+_CODE_INLINE_RE = re.compile(r'`([^`\n]+)`')
+_EQ_INLINE_RE = re.compile(r'(?<!\$)\$(?!\$|\s)([^\n]+?)(?<!\s|\$)\$(?!\$)')
+_INLINE_PRIORITY = {'code': 0, 'equation': 1, 'link': 2, 'bold': 3, 'italic': 4}
+
+
+def create_rich_text(text, _bold=False, _italic=False):
+    """テキストをリッチテキストオブジェクトに変換（統合インラインパーサー）
+
+    コード・数式・太字・斜体・リンクを単一パスで処理することで、
+    太字内の数式など入れ子パターン（例: **text $eq$**）を正しく扱う。
+    _bold/_italic は再帰呼び出し時に継承するアノテーションフラグ。
+    """
     if not text:
         return []
 
-    # インラインコード、インライン数式、太字、斜体、リンクを処理
     result = []
     remaining = text
 
     while remaining:
-        # 最も早い位置のマッチを選択（コード vs 数式）
-        # 改行をまたぐマッチは許可しない（段落の改行保持と両立させるため）
-        code_match = re.search(r'`([^`\n]+)`', remaining)
-        eq_match = re.search(r'(?<!\$)\$(?!\$|\s)([^\n]+?)(?<!\s|\$)\$(?!\$)', remaining)
-
-        # 候補を位置順にソート
         candidates = []
-        if code_match:
-            candidates.append(('code', code_match))
-        if eq_match:
-            candidates.append(('equation', eq_match))
+        m = _CODE_INLINE_RE.search(remaining)
+        if m:
+            candidates.append(('code', m))
+        m = _EQ_INLINE_RE.search(remaining)
+        if m:
+            candidates.append(('equation', m))
+        m = _LINK_RE.search(remaining)
+        if m:
+            candidates.append(('link', m))
+        m = _BOLD_RE.search(remaining)
+        if m:
+            candidates.append(('bold', m))
+        m = _ITALIC_RE.search(remaining)
+        if m:
+            candidates.append(('italic', m))
 
         if not candidates:
-            result.extend(parse_inline_formatting(remaining))
+            seg = {"type": "text", "text": {"content": remaining}}
+            ann = {}
+            if _bold:
+                ann["bold"] = True
+            if _italic:
+                ann["italic"] = True
+            if ann:
+                seg["annotations"] = ann
+            result.append(seg)
             break
 
-        candidates.sort(key=lambda x: x[1].start())
-        match_type, match = candidates[0]
+        # 最も左のマッチを選択（同位置なら code > equation > link > bold > italic）
+        candidates.sort(key=lambda x: (x[1].start(), _INLINE_PRIORITY[x[0]]))
+        kind, match = candidates[0]
 
         before = remaining[:match.start()]
         if before:
-            result.extend(parse_inline_formatting(before))
+            seg = {"type": "text", "text": {"content": before}}
+            ann = {}
+            if _bold:
+                ann["bold"] = True
+            if _italic:
+                ann["italic"] = True
+            if ann:
+                seg["annotations"] = ann
+            result.append(seg)
 
-        if match_type == 'code':
+        if kind == 'code':
+            ann = {"code": True}
+            if _bold:
+                ann["bold"] = True
+            if _italic:
+                ann["italic"] = True
             result.append({
                 "type": "text",
                 "text": {"content": match.group(1)},
-                "annotations": {"code": True}
+                "annotations": ann,
             })
-        else:
+        elif kind == 'equation':
+            # 数式ブロックはアノテーション非対応
             result.append({
                 "type": "equation",
                 "equation": {"expression": match.group(1)}
             })
+        elif kind == 'link':
+            url = match.group(2)
+            link_text = match.group(1)
+            seg = ({"type": "text", "text": {"content": link_text, "link": {"url": url}}}
+                   if url.startswith(('http://', 'https://'))
+                   else {"type": "text", "text": {"content": link_text}})
+            ann = {}
+            if _bold:
+                ann["bold"] = True
+            if _italic:
+                ann["italic"] = True
+            if ann:
+                seg["annotations"] = ann
+            result.append(seg)
+        elif kind == 'bold':
+            # 太字内部を再帰処理（内側の数式・コードも正しく変換）
+            result.extend(create_rich_text(match.group(1), _bold=True, _italic=_italic))
+        else:  # italic
+            content = match.group(1) or match.group(2)
+            result.extend(create_rich_text(content, _bold=_bold, _italic=True))
 
         remaining = remaining[match.end():]
-        continue
 
     return result if result else [{"type": "text", "text": {"content": text}}]
 
