@@ -433,6 +433,78 @@ def build_nested_list(items):
     return result
 
 
+def _build_image_table_as_columns(rows, has_header, upload_ids, md_dir):
+    """画像セルを含むテーブルを column_list ブロックに変換する。
+
+    Notion の table ブロックはセル内に画像を埋め込めないため、
+    画像セルが含まれるテーブルは column_list > column > [paragraph, image] 構造に変換する。
+    """
+    if not rows:
+        return None
+    table_width = len(rows[0])
+    if table_width == 0:
+        return None
+
+    header_row = rows[0] if has_header else None
+    data_rows = rows[1:] if has_header else rows
+
+    columns = []
+    for col_idx in range(table_width):
+        col_children = []
+
+        if header_row and col_idx < len(header_row) and header_row[col_idx].strip():
+            col_children.append({
+                "type": "paragraph",
+                "paragraph": {"rich_text": create_rich_text(header_row[col_idx])}
+            })
+
+        for row in data_rows:
+            if col_idx >= len(row):
+                continue
+            cell = row[col_idx].strip()
+            if not cell:
+                continue
+
+            img_match = re.match(r'^!\[([^\]]*)\]\(([^)]+)\)\s*$', cell)
+            if img_match:
+                alt, path = img_match.groups()
+                if not path.startswith(('http://', 'https://')):
+                    filename = Path(path).name
+                    if filename in upload_ids:
+                        image_block = {
+                            "type": "image",
+                            "image": {"type": "file_upload", "file_upload": {"id": upload_ids[filename]}}
+                        }
+                        if alt:
+                            image_block["image"]["caption"] = [{"type": "text", "text": {"content": alt}}]
+                        col_children.append(image_block)
+                    else:
+                        col_children.append({
+                            "type": "paragraph",
+                            "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"[画像: {filename}]"}}]}
+                        })
+                else:
+                    col_children.append({
+                        "type": "image",
+                        "image": {"type": "external", "external": {"url": path}}
+                    })
+            else:
+                col_children.append({
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": create_rich_text(cell)}
+                })
+
+        columns.append({
+            "type": "column",
+            "column": {"children": col_children}
+        })
+
+    return {
+        "type": "column_list",
+        "column_list": {"children": columns}
+    }
+
+
 def markdown_to_blocks(content, md_dir, upload_ids=None):
     """MarkdownをNotionブロックのリストに変換
 
@@ -681,27 +753,34 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
                                 file=sys.stderr,
                             )
 
-                    children = []
-                    for row in rows:
-                        # 不足は空セルで埋め、超過は truncate
-                        if len(row) < table_width:
-                            row = row + [''] * (table_width - len(row))
-                        else:
-                            row = row[:table_width]
-                        cells = [create_rich_text(cell) for cell in row]
-                        children.append({
-                            "type": "table_row",
-                            "table_row": {"cells": cells}
+                    # 画像セルがある場合は column_list に変換（Notion table は画像セル非対応）
+                    _img_re = re.compile(r'!\[[^\]]*\]\([^)]+\)')
+                    if any(_img_re.search(cell) for row in rows for cell in row[:table_width]):
+                        col_block = _build_image_table_as_columns(rows, has_header, upload_ids, md_dir)
+                        if col_block:
+                            blocks.append(col_block)
+                    else:
+                        children = []
+                        for row in rows:
+                            # 不足は空セルで埋め、超過は truncate
+                            if len(row) < table_width:
+                                row = row + [''] * (table_width - len(row))
+                            else:
+                                row = row[:table_width]
+                            cells = [create_rich_text(cell) for cell in row]
+                            children.append({
+                                "type": "table_row",
+                                "table_row": {"cells": cells}
+                            })
+                        blocks.append({
+                            "type": "table",
+                            "table": {
+                                "table_width": table_width,
+                                "has_column_header": has_header,
+                                "has_row_header": False,
+                                "children": children
+                            }
                         })
-                    blocks.append({
-                        "type": "table",
-                        "table": {
-                            "table_width": table_width,
-                            "has_column_header": has_header,
-                            "has_row_header": False,
-                            "children": children
-                        }
-                    })
             else:
                 # 1行だけのテーブル行は段落として処理
                 blocks.append({
@@ -844,13 +923,19 @@ def delete_all_blocks(page_id, headers, max_workers=5):
     return total - failed
 
 
+def _strip_private_keys(obj):
+    """再帰的にプライベートキー（_で始まる）を除去"""
+    if isinstance(obj, dict):
+        return {k: _strip_private_keys(v) for k, v in obj.items() if not k.startswith('_')}
+    if isinstance(obj, list):
+        return [_strip_private_keys(item) for item in obj]
+    return obj
+
+
 def append_blocks(page_id, blocks, headers):
     """ブロックをページに追加（100件ずつ）"""
-    # プレースホルダー情報を除去してAPIに送信
-    api_blocks = []
-    for block in blocks:
-        b = {k: v for k, v in block.items() if not k.startswith('_')}
-        api_blocks.append(b)
+    # プレースホルダー情報を除去してAPIに送信（ネストされたブロックも含めて再帰的に）
+    api_blocks = [_strip_private_keys(block) for block in blocks]
 
     # 100件ずつ分割
     total_chunks = (len(api_blocks) + 99) // 100
