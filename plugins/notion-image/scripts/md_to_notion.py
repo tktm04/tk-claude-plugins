@@ -666,12 +666,38 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
         if line.startswith('>'):
             quote_lines = []
             while i < len(lines) and lines[i].startswith('>'):
-                quote_lines.append(lines[i][1:].strip())
+                raw = lines[i]
+                if raw.startswith('> '):
+                    quote_lines.append(raw[2:])
+                elif raw == '>':
+                    quote_lines.append('')
+                else:
+                    quote_lines.append(raw[1:])
                 i += 1
-            blocks.append({
-                "type": "quote",
-                "quote": {"rich_text": create_rich_text('\n'.join(quote_lines))}
-            })
+            inner_content = '\n'.join(quote_lines)
+            inner_blocks = markdown_to_blocks(inner_content, md_dir, upload_ids)
+
+            if not inner_blocks:
+                continue
+
+            if len(inner_blocks) == 1 and inner_blocks[0]["type"] == "paragraph":
+                # シンプルな単一段落: 従来通り rich_text として格納
+                blocks.append({
+                    "type": "quote",
+                    "quote": {"rich_text": inner_blocks[0]["paragraph"]["rich_text"]}
+                })
+            else:
+                # テーブル・見出しなど複数ブロックを含む場合: children として格納
+                if inner_blocks and inner_blocks[0]["type"] == "paragraph":
+                    first_rt = inner_blocks[0]["paragraph"]["rich_text"]
+                    children = inner_blocks[1:]
+                else:
+                    first_rt = []
+                    children = inner_blocks
+                quote_block = {"type": "quote", "quote": {"rich_text": first_rt}}
+                if children:
+                    quote_block["quote"]["children"] = children
+                blocks.append(quote_block)
             continue
 
         # リスト（箇条書き・番号付き、ネスト対応）
