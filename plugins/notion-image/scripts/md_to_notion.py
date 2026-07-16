@@ -22,6 +22,7 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 
 def load_notion_token():
@@ -65,6 +66,40 @@ def http_request(url, method="GET", headers=None, data=None, timeout=30):
     except URLError as e:
         print(f"Error: Request failed: {e}", file=sys.stderr)
         return None, None
+    except (TimeoutError, OSError) as e:
+        print(f"Error: Request timeout/connection error: {e}", file=sys.stderr)
+        return None, None
+
+
+def http_request_with_retry(url, method="GET", headers=None, data=None,
+                            timeout=30, max_retries=5):
+    """HTTPリクエスト + 一時的な失敗のリトライ（指数バックオフ）"""
+    last_status = None
+    last_body = None
+    for attempt in range(max_retries):
+        status, body = http_request(url, method, headers, data, timeout)
+        last_status, last_body = status, body
+
+        should_retry = False
+        reason = None
+        if status == 429:
+            should_retry = True
+            reason = "rate limited"
+        elif status is None:
+            should_retry = True
+            reason = "timeout/connection error"
+        elif 500 <= status < 600:
+            should_retry = True
+            reason = f"server error {status}"
+
+        if should_retry and attempt < max_retries - 1:
+            retry_after = 1.0 * (2 ** attempt)
+            print(f"  Temporary failure ({reason}), retrying in {retry_after}s...", file=sys.stderr)
+            time.sleep(retry_after)
+            continue
+
+        return status, body
+    return last_status, last_body
 
 
 def create_multipart_body(filename, file_data, content_type):
@@ -100,6 +135,9 @@ def upload_file_multipart(url, token, filename, file_data, content_type, timeout
     except URLError as e:
         print(f"Error: Upload failed: {e}", file=sys.stderr)
         return None, None
+    except (TimeoutError, OSError) as e:
+        print(f"Error: Upload timeout/connection error: {e}", file=sys.stderr)
+        return None, None
 
 
 # =============================================================================
@@ -111,28 +149,47 @@ def create_rich_text(text):
     if not text:
         return []
 
-    # インラインコード、太字、斜体、リンクを処理
+    # インラインコード、インライン数式、太字、斜体、リンクを処理
     result = []
     remaining = text
 
     while remaining:
-        # インラインコード `code`
-        match = re.search(r'`([^`]+)`', remaining)
-        if match:
-            before = remaining[:match.start()]
-            if before:
-                result.extend(parse_inline_formatting(before))
+        # 最も早い位置のマッチを選択（コード vs 数式）
+        code_match = re.search(r'`([^`]+)`', remaining)
+        eq_match = re.search(r'(?<!\$)\$(?!\$|\s)(.+?)(?<!\s|\$)\$(?!\$)', remaining)
+
+        # 候補を位置順にソート
+        candidates = []
+        if code_match:
+            candidates.append(('code', code_match))
+        if eq_match:
+            candidates.append(('equation', eq_match))
+
+        if not candidates:
+            result.extend(parse_inline_formatting(remaining))
+            break
+
+        candidates.sort(key=lambda x: x[1].start())
+        match_type, match = candidates[0]
+
+        before = remaining[:match.start()]
+        if before:
+            result.extend(parse_inline_formatting(before))
+
+        if match_type == 'code':
             result.append({
                 "type": "text",
                 "text": {"content": match.group(1)},
                 "annotations": {"code": True}
             })
-            remaining = remaining[match.end():]
-            continue
+        else:
+            result.append({
+                "type": "equation",
+                "equation": {"expression": match.group(1)}
+            })
 
-        # それ以外
-        result.extend(parse_inline_formatting(remaining))
-        break
+        remaining = remaining[match.end():]
+        continue
 
     return result if result else [{"type": "text", "text": {"content": text}}]
 
@@ -281,6 +338,67 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
             })
             continue
 
+        # ブロック数式 $$...$$
+        if line.strip().startswith('$$'):
+            stripped = line.strip()
+            if stripped.endswith('$$') and len(stripped) > 2 and stripped != '$$':
+                # 単一行: $$expression$$
+                expression = stripped[2:-2].strip()
+                blocks.append({
+                    "type": "equation",
+                    "equation": {"expression": expression}
+                })
+                i += 1
+                continue
+            # 複数行: $$\n...\n$$
+            eq_lines = []
+            i += 1
+            while i < len(lines) and lines[i].strip() != '$$':
+                eq_lines.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1  # 閉じる $$
+            blocks.append({
+                "type": "equation",
+                "equation": {"expression": '\n'.join(eq_lines).strip()}
+            })
+            continue
+
+        # トグルブロック <details><summary>...</summary>...</details>
+        details_match = re.match(r'^<details\s*.*?>\s*$', line, re.IGNORECASE)
+        if details_match:
+            i += 1
+            # <summary>行を探す
+            summary_text = "Toggle"
+            if i < len(lines):
+                summary_match = re.match(r'^<summary>(.*?)</summary>\s*$', lines[i].strip(), re.IGNORECASE)
+                if summary_match:
+                    summary_text = summary_match.group(1).strip()
+                    i += 1
+
+            # </details> までの内容を再帰的にパース
+            inner_lines = []
+            while i < len(lines) and not re.match(r'^</details>\s*$', lines[i].strip(), re.IGNORECASE):
+                inner_lines.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1  # </details> をスキップ
+
+            inner_content = '\n'.join(inner_lines)
+            children = markdown_to_blocks(inner_content, md_dir, upload_ids)
+
+            # toggle heading_3 として出力（is_toggleable: true）
+            toggle_block = {
+                "type": "heading_3",
+                "heading_3": {
+                    "rich_text": create_rich_text(summary_text),
+                    "is_toggleable": True,
+                    "children": children
+                }
+            }
+            blocks.append(toggle_block)
+            continue
+
         # 見出し (h1-h6、h4以上はh3に変換)
         heading_match = re.match(r'^(#{1,6})\s+(.+)$', line)
         if heading_match:
@@ -374,8 +492,17 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
                 # 行をパースし、セパレータ行を検出
                 rows = []
                 has_header = False
+                _ESCAPED_PIPE = "\x00PIPE\x00"  # エスケープ済み \| の一時置換用
+                _INLINE_CODE_PIPE = "\x00CODEPIPE\x00"
+                _BOLD_PIPE = "\x00BOLDPIPE\x00"
                 for j, tl in enumerate(table_lines):
-                    cells = [c.strip() for c in tl.strip().strip('|').split('|')]
+                    # \| をプレースホルダーに退避してからsplit、復元
+                    safe_line = tl.replace('\\|', _ESCAPED_PIPE)
+                    # インラインコード内の | を退避: `...|...` → プレースホルダー
+                    safe_line = re.sub(r'`([^`]*)`', lambda m: '`' + m.group(1).replace('|', _INLINE_CODE_PIPE) + '`', safe_line)
+                    # 太字内の | を退避: **...|...** → プレースホルダー
+                    safe_line = re.sub(r'\*\*([^*]*)\*\*', lambda m: '**' + m.group(1).replace('|', _BOLD_PIPE) + '**', safe_line)
+                    cells = [c.strip().replace(_ESCAPED_PIPE, '|').replace(_INLINE_CODE_PIPE, '|').replace(_BOLD_PIPE, '|') for c in safe_line.strip().strip('|').split('|')]
                     # セパレータ行 (|---|---|) の判定
                     if j == 1 and all(re.match(r'^[-:]+$', c.strip()) for c in cells if c.strip()):
                         has_header = True
@@ -414,7 +541,7 @@ def markdown_to_blocks(content, md_dir, upload_ids=None):
         # 通常の段落
         para_lines = [line]
         i += 1
-        while i < len(lines) and lines[i].strip() and not re.match(r'^(#{1,6}\s|\s*[-*+]\s|\s*\d+\.\s|>|```|!\[|[-*_]{3,}\s*$|\s*\|)', lines[i]):
+        while i < len(lines) and lines[i].strip() and not re.match(r'^(#{1,6}\s|\s*[-*+]\s|\s*\d+\.\s|>|```|\$\$|!\[|[-*_]{3,}\s*$|\s*\|)', lines[i]):
             para_lines.append(lines[i])
             i += 1
 
@@ -491,30 +618,56 @@ def get_all_blocks(page_id, headers):
 
 
 def delete_all_blocks(page_id, headers, max_workers=5):
-    """ページの全ブロックを並列削除"""
-    blocks = get_all_blocks(page_id, headers)
-    if not blocks:
-        return 0
-
+    """ページの全ブロックをストリーム並列削除（取得しながら即座に削除開始）"""
     def delete_one(block_id):
-        status, body = http_request(
+        status, body = http_request_with_retry(
             f"https://api.notion.com/v1/blocks/{block_id}",
             method="DELETE",
             headers=headers,
-            timeout=30
+            timeout=60
         )
         return status, body, block_id
 
+    futures = []
+    total = 0
     failed = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(delete_one, b["id"]) for b in blocks]
-        for future in as_completed(futures):
-            status, body, block_id = future.result()
-            if status is not None and status != 200 and body:
-                print(f"Warning: Failed to delete block {block_id}: {status}", file=sys.stderr)
-                failed += 1
+    completed = 0
+    url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100"
 
-    return len(blocks) - failed
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # ページネーションしながら即座にDELETEをsubmit
+        while url:
+            status, body = http_request(url, headers=headers, timeout=60)
+            if status is None or status != 200:
+                break
+            data = json.loads(body)
+            for block in data.get("results", []):
+                futures.append(executor.submit(delete_one, block["id"]))
+                total += 1
+                if total % 50 == 0:
+                    print(f"  delete queued: {total} blocks")
+            if data.get("has_more"):
+                url = f"https://api.notion.com/v1/blocks/{page_id}/children?page_size=100&start_cursor={data['next_cursor']}"
+            else:
+                url = None
+
+        for future in as_completed(futures):
+            try:
+                status, body, block_id = future.result()
+                if status is not None and status != 200 and body:
+                    print(f"Warning: Failed to delete block {block_id}: {status}", file=sys.stderr)
+                    failed += 1
+                completed += 1
+                if completed == total or completed % 50 == 0:
+                    print(f"  delete progress: {completed}/{total} done, failed={failed}")
+            except Exception as e:
+                print(f"Warning: Delete worker error: {e}", file=sys.stderr)
+                failed += 1
+                completed += 1
+                if completed == total or completed % 50 == 0:
+                    print(f"  delete progress: {completed}/{total} done, failed={failed}")
+
+    return total - failed
 
 
 def append_blocks(page_id, blocks, headers):
@@ -526,9 +679,14 @@ def append_blocks(page_id, blocks, headers):
         api_blocks.append(b)
 
     # 100件ずつ分割
-    for i in range(0, len(api_blocks), 100):
+    total_chunks = (len(api_blocks) + 99) // 100
+    for chunk_idx, i in enumerate(range(0, len(api_blocks), 100), start=1):
         chunk = api_blocks[i:i+100]
-        status, body = http_request(
+        print(
+            f"  append chunk {chunk_idx}/{total_chunks}: "
+            f"blocks {i + 1}-{i + len(chunk)} / {len(api_blocks)}"
+        )
+        status, body = http_request_with_retry(
             f"https://api.notion.com/v1/blocks/{page_id}/children",
             method="PATCH",
             headers=headers,
@@ -539,6 +697,7 @@ def append_blocks(page_id, blocks, headers):
             if body:
                 print(f"Error: Append blocks failed: {status} {body}", file=sys.stderr)
             return False
+        print(f"  append chunk {chunk_idx}/{total_chunks}: done")
     return True
 
 
@@ -581,7 +740,7 @@ def extract_local_images(content, md_dir):
     return images
 
 
-def upload_images_parallel(images, token, headers, max_workers=3):
+def upload_images_parallel(images, token, headers, max_workers=5):
     """画像を並列アップロード"""
     if not images:
         return {}
@@ -613,7 +772,7 @@ def upload_image(file_path, token, headers):
                     ".gif": "image/gif", ".webp": "image/webp"}.get(ext, "image/png")
 
     # Step 1: Create upload
-    status, body = http_request(
+    status, body = http_request_with_retry(
         "https://api.notion.com/v1/file_uploads",
         method="POST",
         headers=headers,
@@ -772,7 +931,7 @@ def replace_placeholders(page_id, blocks, md_dir, token, headers, max_workers=3)
             insert_after = resolve_insert_after(block_id, p["prev_id"])
 
             # プレースホルダー削除
-            status, _ = http_request(
+            status, _ = http_request_with_retry(
                 f"https://api.notion.com/v1/blocks/{block_id}",
                 method="DELETE",
                 headers=headers,
@@ -788,7 +947,7 @@ def replace_placeholders(page_id, blocks, md_dir, token, headers, max_workers=3)
             if insert_after:
                 payload["after"] = insert_after
 
-            status, resp = http_request(
+            status, resp = http_request_with_retry(
                 f"https://api.notion.com/v1/blocks/{page_id}/children",
                 method="PATCH",
                 headers=headers,
@@ -814,7 +973,7 @@ def replace_placeholders(page_id, blocks, md_dir, token, headers, max_workers=3)
 
             payload = {"children": [image_block], "after": insert_after}
 
-            status, resp = http_request(
+            status, resp = http_request_with_retry(
                 f"https://api.notion.com/v1/blocks/{page_id}/children",
                 method="PATCH",
                 headers=headers,
@@ -918,22 +1077,32 @@ def main():
                 print(f"  [{i+1}] {block_type}")
         return
 
-    # 画像を先に並列アップロード（1パス方式）
+    # 画像アップロードとブロック削除を並列実行
     upload_ids = {}
-    if local_images:
+    deleted = 0
+    if local_images and not args.append:
+        # 両方必要: 並列実行（画像UPと既存ブロック削除は独立した操作）
+        print(f"Uploading {total_images} images + clearing page (parallel)...")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_upload = executor.submit(upload_images_parallel, local_images, token, headers)
+            future_delete = executor.submit(delete_all_blocks, args.page_id, headers)
+            upload_ids = future_upload.result()
+            deleted = future_delete.result()
+        print(f"  Images: {len(upload_ids)}/{total_images}, Deleted: {deleted} blocks")
+    elif local_images:
+        # appendモード: 画像アップロードのみ
         print(f"Uploading {total_images} images (parallel)...")
         upload_ids = upload_images_parallel(local_images, token, headers)
         print(f"  Done: {len(upload_ids)}/{total_images} images")
+    elif not args.append:
+        # 画像なし: ブロック削除のみ
+        print("Clearing existing content...")
+        deleted = delete_all_blocks(args.page_id, headers)
+        print(f"  Deleted {deleted} blocks")
 
     # ブロックに変換（アップロード済みIDを渡す）
     blocks = markdown_to_blocks(content, md_dir, upload_ids)
     print(f"Parsed: {len(blocks)} blocks")
-
-    # 既存コンテンツを削除（appendモードでない場合）
-    if not args.append:
-        print("Clearing existing content...")
-        deleted = delete_all_blocks(args.page_id, headers)
-        print(f"  Deleted {deleted} blocks")
 
     # ブロックを追加（画像ブロック含む）
     print("Uploading content...")

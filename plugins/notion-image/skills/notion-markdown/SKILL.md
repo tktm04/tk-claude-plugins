@@ -1,7 +1,7 @@
 ---
 name: notion-markdown
-description: Markdownファイル（テキスト + 画像）をNotionページにアップロードする。使用場面: レポートやドキュメントをNotionに公開したい時。トリガー: md-to-notion, markdown notion, mdアップロード, notionに公開
-allowed-tools: Bash(md-to-notion:*), Bash(md-to-notion-text:*), Bash(md-to-notion-images:*), Read
+description: "Markdownファイル（テキスト + 画像）をNotionページにアップロードする。使用場面: レポートやドキュメントをNotionに公開したい時。トリガー: md-to-notion, markdown notion, mdアップロード, notionに公開"
+allowed-tools: "Bash(md-to-notion:*), Bash(md-to-notion-text:*), Bash(md-to-notion-images:*), Read"
 ---
 
 # Markdown to Notion Upload
