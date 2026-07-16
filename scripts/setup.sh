@@ -483,11 +483,26 @@ EOF
     fi
 }
 
+# Setup writing plugin
+setup_writing() {
+    echo ""
+    echo "================================"
+    echo " writing セットアップ"
+    echo "================================"
+    echo ""
+
+    install_plugin "writing"
+    register_skill "cognitive-rhythm-writing" "$REPO_DIR/plugins/writing/skills/cognitive-rhythm-writing"
+    register_skill "japanese-tech-writing" "$REPO_DIR/plugins/writing/skills/japanese-tech-writing"
+    enable_plugin "writing"
+}
+
 # Setup all plugins
 setup_all() {
     setup_codex
     setup_gemini
     setup_notion_image
+    setup_writing
 }
 
 # Show usage
@@ -498,12 +513,14 @@ usage() {
     echo "  codex         - Codex CLIレビュープラグイン"
     echo "  gemini        - Gemini CLIレビュープラグイン"
     echo "  notion-image  - Notion画像アップロードプラグイン"
+    echo "  writing       - 日本語執筆規範スキル"
     echo "  all           - すべてのプラグイン"
     echo ""
     echo "Examples:"
     echo "  $0 codex"
     echo "  $0 gemini"
     echo "  $0 notion-image"
+    echo "  $0 writing"
     echo "  $0 all"
 }
 
@@ -523,6 +540,9 @@ main() {
             ;;
         notion-image)
             setup_notion_image
+            ;;
+        writing)
+            setup_writing
             ;;
         all)
             setup_all

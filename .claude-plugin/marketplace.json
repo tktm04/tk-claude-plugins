@@ -24,6 +24,13 @@
       "description": "NotionにFile Uploads APIで画像を直接アップロードするスキル",
       "version": "2.0.0",
       "skills": ["./plugins/notion-image/skills/notion-image", "./plugins/notion-image/skills/notion-markdown"]
+    },
+    {
+      "name": "writing",
+      "source": "./plugins/writing",
+      "description": "日本語の執筆規範スキル（技術文書の整形・論証・冗長排除、認知リズムによる緩急設計）",
+      "version": "1.0.0",
+      "skills": ["./plugins/writing/skills/cognitive-rhythm-writing", "./plugins/writing/skills/japanese-tech-writing"]
     }
   ]
 }

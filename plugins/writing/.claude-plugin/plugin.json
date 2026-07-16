@@ -1,0 +1,7 @@
+{
+  "name": "writing",
+  "version": "1.0.0",
+  "description": "日本語の執筆規範スキル（技術文書の整形・論証・冗長排除、認知リズムによる緩急設計）",
+  "keywords": ["writing", "japanese", "editing"],
+  "skills": ["./skills/cognitive-rhythm-writing", "./skills/japanese-tech-writing"]
+}

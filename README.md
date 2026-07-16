@@ -16,6 +16,7 @@ cd tk-claude-plugins
 ./scripts/setup.sh codex
 ./scripts/setup.sh gemini
 ./scripts/setup.sh notion-image  # notion-markdown も含む
+./scripts/setup.sh writing  # cognitive-rhythm-writing と japanese-tech-writing の両方を含む
 ```
 
 セットアップ後、**Claude Codeを再起動**するとスキルが認識されます。
@@ -198,6 +199,31 @@ md-to-notion-images report.md PAGE_ID --replace-placeholder  # 画像をアッ�
 
 ---
 
+### 4. writing
+
+日本語の執筆規範スキル（`cognitive-rhythm-writing` / `japanese-tech-writing`）。
+
+**機能:**
+- `japanese-tech-writing`：技術文書の整形（一文一行、脚注等）、パラグラフライティング、論証の厳密さ、冗長・LLMっぽい空句の排除
+- `cognitive-rhythm-writing`：説明文に緩急（認知モードの切替）を設計し、平坦な文章を診断・修正する。作業前に `japanese-tech-writing` を読む前提
+
+**セットアップ:**
+```bash
+./scripts/setup.sh writing
+```
+
+**手動ステップ:** なし（スクリプト・APIキー不要）
+
+**使用例:**
+```
+「この草稿を日本語技術文書の規範でリライトして」
+「この章、緩急をつけて読み物っぽくして」
+```
+
+出典: [cognitive-rhythm-writing](https://gist.github.com/k16shikano/eb2929f13ed19c97188393d297be8432), [japanese-tech-writing](https://gist.github.com/k16shikano/fd287c3133457c4fd8f5601d34aa817d)
+
+---
+
 ## Claude Codeへの登録
 
 セットアップスクリプトが自動で `~/.claude/skills/` にスキルを登録します：
@@ -216,6 +242,8 @@ ln -sf /path/to/tk-claude-plugins/plugins/codex/skills/codex ~/.claude/skills/co
 ln -sf /path/to/tk-claude-plugins/plugins/gemini/skills/gemini ~/.claude/skills/gemini
 ln -sf /path/to/tk-claude-plugins/plugins/notion-image/skills/notion-image ~/.claude/skills/notion-image
 ln -sf /path/to/tk-claude-plugins/plugins/notion-image/skills/notion-markdown ~/.claude/skills/notion-markdown
+ln -sf /path/to/tk-claude-plugins/plugins/writing/skills/cognitive-rhythm-writing ~/.claude/skills/cognitive-rhythm-writing
+ln -sf /path/to/tk-claude-plugins/plugins/writing/skills/japanese-tech-writing ~/.claude/skills/japanese-tech-writing
 ```
 
 ## Usage
@@ -238,6 +266,10 @@ Claude Codeで以下のように使用:
 # notion-markdown
 「このMarkdownをNotionにアップロードして」
 /notion-markdown report.md PAGE_ID
+
+# writing
+「この草稿を日本語技術文書の規範でリライトして」
+「この章、緩急をつけて読み物っぽくして」
 ```
 
 コマンドラインからも使用可能:
