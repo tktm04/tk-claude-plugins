@@ -27,6 +27,30 @@ md-to-notion <markdown_file> <page_id>
 |-----------|------|
 | `--dry-run` | アップロードせず確認のみ |
 | `--append` | 既存コンテンツに追記（デフォルトは置換） |
+| `--no-title` | 先頭の `# 見出し` をページタイトルに反映しない |
+
+**注意: 実行はバックグラウンド推奨。** 画像アップロード・ブロック分割・Notion API 呼び出しで数十秒〜数分かかるため、Claude Code から実行する際は Bash tool の `run_in_background: true` を指定する。`--dry-run` は短時間で終わるので前景実行で OK。
+
+---
+
+## 対応する Markdown 要素
+
+`md-to-notion` は以下の Markdown 要素を対応する Notion ブロックに変換する。
+
+| Markdown | Notion ブロック |
+|----------|----------------|
+| `#`〜`######` 見出し | heading_1〜3（4 以降は 3 に丸め） |
+| 箇条書き / 番号付きリスト（ネスト可） | bulleted / numbered list |
+| **太字** / *斜体* / `インラインコード` / [リンク](url) | rich text annotations |
+| ` ```lang ` コードブロック | code ブロック（言語名を正規化） |
+| **GFM パイプテーブル** | **Notion table ブロック**（`\|---\|` セパレータ行の列数を正準列数とする。エスケープ `\|`・インラインコード内・太字内の `\|` も正しく処理） |
+| 画像セルを含むテーブル | column_list（table はセル内画像を持てないため） |
+| `> 引用` | quote ブロック（複数行対応） |
+| `$インライン数式$` / `$$ブロック数式$$` | equation（KaTeX 式） |
+| `<details><summary>` | toggle（heading_3, `is_toggleable`） |
+| `![alt](path)` 画像 | image ブロック（自動アップロード） |
+
+**パイプテーブルはサポート対象。** 旧バージョンでは非対応だったため、テーブルをリスト形式に手動変換していた運用は不要。ただしセル内に画像を含む場合のみ column_list に変換される。
 
 ---
 
@@ -45,9 +69,11 @@ md-to-notion-text <markdown_file> > /tmp/converted.md
 ```
 notion-update-page を使用:
 - page_id: 対象ページID
-- content_format: markdown
-- content: /tmp/converted.md の内容
+- command: replace_content（全置換）または insert_content（追記）
+- new_str（replace_content の場合）/ content（insert_content の場合）: /tmp/converted.md の内容（Notion-flavored Markdown）
 ```
+
+新規ページを作成してから流し込む場合は、`notion-create-pages` で親ページ配下に空ページを作成 → `md-to-notion <file> <新ページID>` の順が最も確実（統合コマンドが置換まで一括で行う）。
 
 ### Step 3: 画像をアップロード
 
